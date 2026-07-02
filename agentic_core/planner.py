@@ -263,7 +263,7 @@ def validate_tool_input(
     参数 schema 不再硬编码在这里,而是从 available_tools(即 ToolRegistry.list())派生,
     保证 prompt 提示、校验、工具真实需求同一个真相源,不会漂移。
     """
-    schema = next(
+    schema: dict[str, Any] = next(
         (tool.get("inputSchema", {}) for tool in available_tools if tool["name"] == tool_name),
         {},
     )

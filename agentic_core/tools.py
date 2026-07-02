@@ -194,14 +194,14 @@ def _eval_node(node: ast.AST) -> int | float:
     例如 128 * 7 的 AST 大概是:
         BinOp(left=128, op=Mult, right=7)
     """
-    binary_ops = {
+    binary_ops: dict[type, Callable[[Any, Any], Any]] = {
         ast.Add: operator.add,
         ast.Sub: operator.sub,
         ast.Mult: operator.mul,
         ast.Div: operator.truediv,
         ast.Mod: operator.mod,
     }
-    unary_ops = {ast.UAdd: operator.pos, ast.USub: operator.neg}
+    unary_ops: dict[type, Callable[[Any], Any]] = {ast.UAdd: operator.pos, ast.USub: operator.neg}
 
     # 数字常量,例如 128 或 7。
     if isinstance(node, ast.Constant) and isinstance(node.value, int | float):

@@ -6,8 +6,8 @@ import os
 # 如果某些 Python 环境没有 readline,也不影响程序运行。
 try:
     import readline  # noqa: F401
-except ImportError:
-    readline = None
+except ImportError:  # pragma: no cover
+    readline = None  # type: ignore[assignment]
 
 from .agent import Agent
 from .memory import MemoryStore
