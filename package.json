@@ -1,0 +1,14 @@
+{
+  "name": "agentic-core-lab",
+  "version": "1.0.0",
+  "description": "Agentic application core loop lab: plan, act, observe, remember, and respond.",
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js",
+    "demo": "node src/index.js \"帮我计算 128 * 7, 然后把结果记录成学习笔记\"",
+    "demo:todo": "node src/index.js \"添加待办: 学习 agentic 核心链路, 然后列出待办\""
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

@@ -1,0 +1,9 @@
+[project]
+name = "agentic-core-lab"
+version = "0.1.0"
+description = "Python lab for agentic application core loop, memory policy, and Ollama/Hermes planner."
+requires-python = ">=3.10"
+dependencies = []
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
