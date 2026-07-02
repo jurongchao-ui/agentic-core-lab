@@ -4,8 +4,8 @@ import json
 import re
 from typing import Any
 
+from .contracts import LlmClient, PlannerContext
 from .json_utils import extract_json_object
-from .ollama_client import OllamaClient
 from .schemas import Action
 
 
@@ -17,7 +17,7 @@ class RuleBasedPlanner:
     2. 作为 HermesPlanner 的兜底方案,当模型输出不合法时接管任务。
     """
 
-    def next(self, context: dict[str, Any]) -> Action:
+    def next(self, context: PlannerContext) -> Action:
         # context 是 Agent 传进来的上下文包。
         # 这里取出最常用的三个字段。
         goal = context["goal"]
@@ -113,14 +113,14 @@ class HermesPlanner:
         Hermes 输出不合格 -> 抛异常 -> RuleBasedPlanner 接管。
     """
 
-    def __init__(self, client: OllamaClient, fallback: RuleBasedPlanner | None = None) -> None:
+    def __init__(self, client: LlmClient, fallback: RuleBasedPlanner | None = None) -> None:
         # client 负责真正请求 Ollama。
         self.client = client
 
         # fallback 是兜底 planner。如果不传,默认创建一个 RuleBasedPlanner。
         self.fallback = fallback or RuleBasedPlanner()
 
-    def next(self, context: dict[str, Any]) -> Action:
+    def next(self, context: PlannerContext) -> Action:
         """让 Hermes 规划下一步 action。
 
         成功路径:
@@ -156,7 +156,7 @@ class HermesPlanner:
             }
             return action
 
-    def _messages(self, context: dict[str, Any]) -> list[dict[str, str]]:
+    def _messages(self, context: PlannerContext) -> list[dict[str, str]]:
         """构造发给 Hermes 的 prompt。
 
         Ollama chat API 的 messages 结构类似:
@@ -199,7 +199,7 @@ class HermesPlanner:
             {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
         ]
 
-    def _parse_action(self, content: str, context: dict[str, Any]) -> Action:
+    def _parse_action(self, content: str, context: PlannerContext) -> Action:
         """把模型输出解析成 Action,并做严格校验。
 
         初学者可以把这里理解为“海关”:
@@ -277,7 +277,7 @@ def validate_tool_input(
             raise ValueError(f"{tool_name} requires input.{field}")
 
 
-def validate_final_action(context: dict[str, Any], answer: str) -> None:
+def validate_final_action(context: PlannerContext, answer: str) -> None:
     """检查模型是否过早结束。
 
     举例:

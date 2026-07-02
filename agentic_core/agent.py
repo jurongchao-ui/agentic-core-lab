@@ -3,9 +3,9 @@ from __future__ import annotations
 import time
 from typing import Any
 
+from .contracts import MemoryPolicy, Planner, PlannerContext, Responder, ResponsePolicy
 from .memory import MemoryStore
-from .memory_policy import MemoryPolicy
-from .response_policy import ResponseContext, ResponseDecision, ResponsePolicy
+from .response_policy import ResponseContext, ResponseDecision, RuleBasedResponsePolicy
 from .schemas import Observation
 from .tools import ToolRegistry
 
@@ -23,12 +23,12 @@ class Agent:
 
     def __init__(
         self,
-        planner: Any,
+        planner: Planner,
         tools: ToolRegistry,
         memory: MemoryStore,
         memory_policy: MemoryPolicy,
         max_steps: int = 8,
-        responder: Any = None,
+        responder: Responder | None = None,
         response_policy: ResponsePolicy | None = None,
     ) -> None:
         # planner: 决定下一步做什么。可以是 HermesPlanner,也可以是 RuleBasedPlanner。
@@ -40,7 +40,7 @@ class Agent:
 
         # response_policy: 最终回复仲裁层。它决定“该追问、确认记忆、总结工具,
         # 还是交给 responder”,避免 responder 覆盖已经发生的系统事实。
-        self.response_policy = response_policy or ResponsePolicy()
+        self.response_policy = response_policy or RuleBasedResponsePolicy()
 
         # tools: 工具注册表。Agent 不知道每个工具内部怎么实现,只按名字调用。
         self.tools = tools
@@ -139,7 +139,7 @@ class Agent:
         for step in range(1, self.max_steps + 1):
             # context 是 planner 做决策时能看到的“上下文包”。
             # 里面有用户目标、当前第几步、历史 trace、记忆、可用工具列表。
-            context = {
+            context: PlannerContext = {
                 "run_id": run_id,
                 "goal": goal,
                 "step": step,

@@ -37,7 +37,7 @@ class ResponseDecision:
         return asdict(self)
 
 
-class ResponsePolicy:
+class RuleBasedResponsePolicy:
     """最终回复仲裁层。
 
     它不负责规划动作,也不自由发挥文采。它只决定:

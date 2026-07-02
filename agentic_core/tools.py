@@ -3,10 +3,28 @@ from __future__ import annotations
 import ast
 import operator
 from collections.abc import Callable
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Literal
 
+from .contracts import MemoryPolicy
 from .memory import MemoryStore
-from .memory_policy import SENSITIVE_PATTERN, MemoryPolicy
+from .memory_policy import SENSITIVE_PATTERN
+
+
+@dataclass
+class ToolSpec:
+    """一个工具的类型化定义(以前是松散 dict)。
+
+    side_effect 是元数据: read=只读, write=会写入记忆。v1 只记录+暴露给 planner,
+    暂不驱动敏感守卫(守卫仍走显式 guard_sensitive)。timeout/cost/approval 等留 v2。
+    """
+
+    name: str
+    description: str
+    execute: Callable[[dict[str, Any]], Any]
+    input_schema: dict[str, dict[str, Any]]
+    side_effect: Literal["read", "write"]
+    guard_sensitive: bool = False
 
 
 class ToolRegistry:
@@ -29,10 +47,8 @@ class ToolRegistry:
         # 不能让模型绕过阈值和敏感信息检查直接写长期记忆。
         self.memory_policy = memory_policy
 
-        # _tools 是一个 dict:
-        # key 是工具名,例如 "calculator"
-        # value 是工具信息,包括 description 和 execute 函数。
-        self._tools: dict[str, dict[str, Any]] = {}
+        # _tools: key 是工具名,value 是类型化的 ToolSpec。
+        self._tools: dict[str, ToolSpec] = {}
 
         # 初始化时注册默认工具。
         self._register_defaults()
@@ -45,11 +61,12 @@ class ToolRegistry:
         """
         return [
             {
-                "name": name,
-                "description": item["description"],
-                "inputSchema": item["input_schema"],
+                "name": spec.name,
+                "description": spec.description,
+                "inputSchema": spec.input_schema,
+                "sideEffect": spec.side_effect,
             }
-            for name, item in self._tools.items()
+            for spec in self._tools.values()
         ]
 
     def has(self, name: str) -> bool:
@@ -71,9 +88,9 @@ class ToolRegistry:
         data = input_data or {}
         # 写入类工具在执行前统一拦截敏感信息。这是所有工具调用的唯一入口,
         # 不管 planner 是规则还是 LLM 都绕不过——敏感信息不落地,不依赖走的是哪条路。
-        if tool["guard_sensitive"] and _contains_sensitive(data):
+        if tool.guard_sensitive and _contains_sensitive(data):
             raise ValueError("拒绝写入敏感信息(密码/密钥/证件号等),不落地。")
-        return tool["execute"](data)
+        return tool.execute(data)
 
     def _register(
         self,
@@ -81,24 +98,24 @@ class ToolRegistry:
         description: str,
         execute: Callable[[dict[str, Any]], Any],
         input_schema: dict[str, dict[str, Any]] | None = None,
+        side_effect: Literal["read", "write"] = "read",
         guard_sensitive: bool = False,
     ) -> None:
         """注册一个工具。
 
-        execute 是一个函数,接收 dict 参数,返回任意结果。
-        Callable[[dict[str, Any]], Any] 的意思是:
-            这是一个可调用对象,输入是 dict[str, Any],输出可以是任意类型。
-
         input_schema 描述工具参数,格式为 字段名 -> spec,例如:
             {"expression": {"type": "string", "required": True}}
         这是该工具参数的唯一真相源,无参工具(如 todo.list)传空 dict。
+        side_effect: read/write; guard_sensitive: 是否在执行前拦截敏感输入。
         """
-        self._tools[name] = {
-            "description": description,
-            "execute": execute,
-            "input_schema": input_schema or {},
-            "guard_sensitive": guard_sensitive,
-        }
+        self._tools[name] = ToolSpec(
+            name=name,
+            description=description,
+            execute=execute,
+            input_schema=input_schema or {},
+            side_effect=side_effect,
+            guard_sensitive=guard_sensitive,
+        )
 
     def _register_defaults(self) -> None:
         """注册本项目内置的几个教学工具。"""
@@ -121,6 +138,7 @@ class ToolRegistry:
             # Agent 会捕获并记录为失败 observation。
             lambda input_data: self.memory.add_note(str(input_data["text"])),
             {"text": {"type": "string", "required": True}},
+            side_effect="write",
             guard_sensitive=True,
         )
         self._register(
@@ -128,6 +146,7 @@ class ToolRegistry:
             "Add a todo item.",
             lambda input_data: self.memory.add_todo(str(input_data["text"])),
             {"text": {"type": "string", "required": True}},
+            side_effect="write",
             guard_sensitive=True,
         )
         self._register(
@@ -140,6 +159,7 @@ class ToolRegistry:
             "Propose a long-term memory. Gated by the memory policy; low-value or sensitive text is rejected.",
             self._memory_add,
             {"text": {"type": "string", "required": True}},
+            side_effect="write",
         )
 
     def _memory_add(self, input_data: dict[str, Any]) -> dict[str, Any]:

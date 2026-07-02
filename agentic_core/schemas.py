@@ -103,3 +103,19 @@ class MemoryDecision:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+@dataclass
+class SafetyDecision:
+    """SafetyPolicy 的输出: 是否拒绝整轮请求。
+
+    区别于 MemoryPolicy 的“敏感信息不保存”(local safety),
+    这是请求级的全局安全拦截(global safety): 命中即拒绝整轮,不评估记忆、不跑 loop。
+    """
+
+    refuse: bool
+    category: str  # "none" | "malware" | "weapons" | ...
+    reason: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)

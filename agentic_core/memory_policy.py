@@ -4,8 +4,8 @@ import json
 import re
 from typing import Any
 
+from .contracts import LlmClient
 from .json_utils import extract_json_object
-from .ollama_client import OllamaClient
 from .schemas import MemoryDecision
 
 
@@ -28,24 +28,7 @@ SENSITIVE_PATTERN = re.compile(
 )
 
 
-class MemoryPolicy:
-    """记忆策略的契约(基类)。
-
-    只声明一个能力:
-        evaluate(text) -> MemoryDecision
-
-    有两个实现:
-        RuleBasedMemoryPolicy: 纯正则,确定性,离线,作为兜底。
-        LlmMemoryPolicy:       LLM 做语义抽取,程序把关,Ollama 不可用时回退到规则版。
-
-    这和 planner.py 里 RuleBasedPlanner / HermesPlanner 的关系一模一样。
-    """
-
-    def evaluate(self, text: str) -> MemoryDecision:
-        raise NotImplementedError
-
-
-class RuleBasedMemoryPolicy(MemoryPolicy):
+class RuleBasedMemoryPolicy:
     """决定“要不要把这句话写入长期记忆”的规则层。
 
     一个重要原则:
@@ -297,7 +280,7 @@ def coerce_confidence(value: Any, default: int) -> int:
     return max(0, min(100, int(number)))
 
 
-class LlmMemoryPolicy(MemoryPolicy):
+class LlmMemoryPolicy:
     """用 LLM 做语义记忆抽取的策略,程序保留最终 gate。
 
     结构和 planner.py 的 HermesPlanner 一模一样:
@@ -319,7 +302,7 @@ class LlmMemoryPolicy(MemoryPolicy):
     CONFIDENCE_THRESHOLD = 60
 
     def __init__(
-        self, client: OllamaClient, fallback: RuleBasedMemoryPolicy | None = None
+        self, client: LlmClient, fallback: RuleBasedMemoryPolicy | None = None
     ) -> None:
         self.client = client
         self.fallback = fallback or RuleBasedMemoryPolicy()

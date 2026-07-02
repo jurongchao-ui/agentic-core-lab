@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from .ollama_client import OllamaClient
+from .contracts import LlmClient
 
 
 # Ollama 不可用/返回空时的兜底回复: 说明能力,引导用户,而不是留白。
@@ -19,7 +19,7 @@ class LlmResponder:
     和项目其它 LLM 组件一样: LLM 不可用或返回空,就回退到一句固定的能力引导语。
     """
 
-    def __init__(self, client: OllamaClient) -> None:
+    def __init__(self, client: LlmClient) -> None:
         self.client = client
 
     def reply(self, goal: str, memory_snapshot: dict[str, Any]) -> str:

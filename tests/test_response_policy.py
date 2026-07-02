@@ -6,7 +6,7 @@ from agentic_core.agent import Agent
 from agentic_core.memory import MemoryStore
 from agentic_core.memory_policy import RuleBasedMemoryPolicy
 from agentic_core.planner import RuleBasedPlanner
-from agentic_core.response_policy import ResponseContext, ResponsePolicy
+from agentic_core.response_policy import ResponseContext, RuleBasedResponsePolicy
 from agentic_core.schemas import MemoryDecision
 from agentic_core.tools import ToolRegistry
 
@@ -56,7 +56,7 @@ def context(
 
 
 def test_clarification_global_intercept() -> None:
-    policy = ResponsePolicy()
+    policy = RuleBasedResponsePolicy()
     response = policy.decide(
         context(
             decision(
@@ -73,7 +73,7 @@ def test_clarification_global_intercept() -> None:
 
 
 def test_local_safety_can_be_combined_with_safe_tool_result() -> None:
-    policy = ResponsePolicy()
+    policy = RuleBasedResponsePolicy()
     response = policy.decide(
         context(
             decision(reason="包含敏感信息风险,不进入长期记忆。", scores={"sensitivity_risk": 5}),
@@ -88,7 +88,7 @@ def test_local_safety_can_be_combined_with_safe_tool_result() -> None:
 
 def test_local_safety_fires_from_structured_signal_without_keyword() -> None:
     """输入 decision 的 reason 不含“敏感”,仅靠 sensitivity_risk 信号也能命中 safety 档。"""
-    policy = ResponsePolicy()
+    policy = RuleBasedResponsePolicy()
     response = policy.decide(
         context(decision(reason="按策略不保存", scores={"sensitivity_risk": 5}))
     )
@@ -98,7 +98,7 @@ def test_local_safety_fires_from_structured_signal_without_keyword() -> None:
 
 
 def test_memory_confirmation_uses_saved_memories_list() -> None:
-    policy = ResponsePolicy()
+    policy = RuleBasedResponsePolicy()
     response = policy.decide(
         context(
             decision(save=True, text="用户偏好: 每次学习控制在30分钟以内"),
@@ -116,7 +116,7 @@ def test_memory_confirmation_uses_saved_memories_list() -> None:
 
 
 def test_tool_success_summary_comes_from_observation() -> None:
-    policy = ResponsePolicy()
+    policy = RuleBasedResponsePolicy()
     response = policy.decide(
         context(
             decision(),
@@ -137,7 +137,7 @@ def test_tool_success_summary_comes_from_observation() -> None:
 
 
 def test_failed_calculation_blocks_dependent_note_confirmation() -> None:
-    policy = ResponsePolicy()
+    policy = RuleBasedResponsePolicy()
     response = policy.decide(
         ResponseContext(
             goal="帮我算 128 / 0，然后记成笔记",
@@ -168,7 +168,7 @@ def test_failed_calculation_blocks_dependent_note_confirmation() -> None:
 
 
 def test_normal_turn_uses_responder() -> None:
-    policy = ResponsePolicy()
+    policy = RuleBasedResponsePolicy()
     response = policy.decide(context(decision(), responder=StubResponder()))
 
     assert response.text == "自然回复: 测试目标"
