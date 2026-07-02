@@ -5,7 +5,12 @@
 Python 主线目标:
 
 ```text
-User Input -> MemoryPolicy -> Hermes/Ollama Planner -> Tool Executor -> Observation -> MemoryStore -> Final Answer
+User Input
+  -> MemoryPolicy(规则版 或 LLM版, 程序把关 + 敏感一票否决)
+  -> [写入长期记忆]
+  -> Plan-Act-Observe loop(Planner -> ToolRegistry[敏感守卫] -> Observation)
+  -> ResponsePolicy(拦截/组合/兜底, 仲裁最终回复)
+  -> Final Answer
 ```
 
 JS v0 目标:
@@ -87,10 +92,17 @@ AGENTIC_CHAT_INLINE_PROMPT=1 python3 -m agentic_core.chat
 
 注意: 当前阶段的记忆只在本次 chat 进程内共享。退出 `chat.py` 后,内存里的 notes、todos、longTermMemories 仍会消失。下一阶段会把记忆持久化到 `data/memory.json`。
 
-切换 Planner:
+切换组件(环境变量):
+
+- `AGENTIC_PLANNER=hermes|rule`(默认 hermes): LLM planner 或纯规则 planner。
+- `AGENTIC_MEMORY_POLICY=llm|rule`(默认 llm): LLM 抽取记忆策略 或纯规则版。
+- `AGENTIC_MODEL=openhermes:latest`: Ollama 模型名。
+- `AGENTIC_TRACE=off|brief|json`: 过程可见度(见上文)。
+
+`AGENTIC_PLANNER=rule` + `AGENTIC_MEMORY_POLICY=rule` 可完全离线运行(不依赖 Ollama):
 
 ```bash
-AGENTIC_PLANNER=rule python3 -m agentic_core.cli "帮我计算 128 * 7, 然后记录成学习笔记"
+AGENTIC_PLANNER=rule AGENTIC_MEMORY_POLICY=rule python3 -m agentic_core.cli "帮我计算 128 * 7, 然后记录成学习笔记"
 AGENTIC_MODEL=openhermes:latest python3 -m agentic_core.cli "添加待办: 学习 agentic 核心链路, 然后列出待办"
 ```
 
@@ -104,32 +116,54 @@ python3 examples/run_memory_demo.py
 
 ```text
 agentic_core/
-  cli.py              # CLI 入口
-  agent.py            # Plan-Act-Observe loop
+  cli.py              # 单次运行入口
+  chat.py             # 连续对话入口(多轮共享 MemoryStore)
+  agent.py            # Plan-Act-Observe loop 编排
   ollama_client.py    # Ollama /api/chat 调用
-  planner.py          # HermesPlanner + RuleBasedPlanner fallback
+  planner.py          # HermesPlanner(LLM) + RuleBasedPlanner(兜底)
+  memory_policy.py    # RuleBasedMemoryPolicy + LlmMemoryPolicy(抽取+把关)
   memory.py           # notes/todos/events/long_term_memories
-  memory_policy.py    # 长期记忆维度评分与保存决策
-  tools.py            # calculator/note/todo/memory tools
-  schemas.py          # action/observation/memory decision 数据结构
+  tools.py            # calculator/note/todo/memory 工具 + 敏感守卫 + schema 真相源
+  responder.py        # 无工具时的自然语言回复(LlmResponder)
+  response_policy.py  # 最终回复仲裁(拦截/组合/兜底)
+  trace_view.py       # 可读分步 trace 渲染
+  json_utils.py       # 从模型输出里抽 JSON(planner/policy 共享)
+  schemas.py          # Action/Observation/MemoryDecision 数据结构
 ```
 
-## MemoryPolicy
+## MemoryPolicy(记忆策略)
 
-`MemoryPolicy` 不把所有用户输入都写入长期记忆,而是按维度评分:
+核心原则: 不是用户说的每句话都值得进长期记忆,且**敏感信息一票否决**(密码/密钥/证件号等,由程序侧正则拦截,不依赖模型)。两个实现共用 `evaluate(text) -> MemoryDecision` 契约,用 `AGENTIC_MEMORY_POLICY` 切换:
 
-- `future_relevance`: 是否影响未来决策。
-- `stability`: 是否长期稳定。
-- `user_preference`: 是否表达偏好、约束、习惯。
-- `task_continuity`: 是否帮助未来任务延续。
-- `sensitivity_risk`: 是否包含敏感或不适合保存的信息。
-
-默认正向分达到 7 且敏感风险不高才保存。
+- `RuleBasedMemoryPolicy`(纯规则,确定性,离线): 按维度打分——`future_relevance` / `stability` / `user_preference` / `task_continuity` / `explicit_memory_intent` / `user_profile`,正向分达阈值 7 且敏感风险不高才保存。也是 LLM 版的兜底。
+- `LlmMemoryPolicy`(默认): LLM 做语义抽取,程序做最终把关(敏感一票否决 + 置信度阈值 + 类型校验);Ollama 不可用或输出非法时回退规则版。
 
 示例:
 
 - “我今天有点累”: 临时状态,不保存。
 - “以后安排学习任务时，每次控制在30分钟以内”: 长期偏好,保存。
+- “我的密码是 …”: 敏感,拒绝保存(也不会写进 note/todo)。
+
+## 最终回复与安全
+
+- **ResponsePolicy** 仲裁最终回复,不让 responder 覆盖已发生的系统事实。优先级分三类:
+  - 拦截档(命中即停): clarification(追问)、local_safety(拒绝保存敏感信息)。
+  - 内容档(可组合): 记忆确认、工具结果汇总、失败/未完成说明。
+  - 兜底档: planner 的 final answer、普通闲聊交给 `LlmResponder`。
+- **闲聊也能答**: 本轮没调用任何工具时,由 `LlmResponder` 用自然语言回复(不再是空模板)。
+- **敏感信息不落地**: 长期记忆、note.add、todo.add、memory.add 都过同一份 `SENSITIVE_PATTERN`,不管被路由到哪条路。
+
+## 开发与测试
+
+本机 externally-managed,用 venv:
+
+```bash
+python3 -m venv .venv && .venv/bin/pip install pytest mypy
+.venv/bin/python -m pytest -q     # 38 个测试
+.venv/bin/python -m mypy          # 类型检查(门禁锁 agentic_core)
+```
+
+CI: `.github/workflows/ci.yml` 每次 push / PR 自动跑 mypy + pytest。
 
 ## JS v0 快速运行
 
@@ -140,8 +174,6 @@ User Goal -> Context Builder -> Planner -> Tool Executor -> Observation -> Memor
                                   ^                                            |
                                   |---------------- Re-plan Loop --------------|
 ```
-
-## 快速运行
 
 ```bash
 cd agentic
@@ -180,24 +212,31 @@ node src/index.js "帮我计算 23 + 19, 并记录为笔记"
    - 将关键 observation 写入 memory。
    - trace 保留每次 action、observation、耗时和错误。
 
-## 文件结构
+## 仓库结构
 
 ```text
 agentic/
-  src/
-    agent.js       # Agent loop 编排
-    index.js       # CLI 入口
-    memory.js      # 简单内存存储
-    planner.js     # 可替换 planner
-    tools.js       # 工具注册与执行
-  docs/
-    core-link.md   # 设计说明
+  agentic_core/     # Python 主线(见上文模块职责)
+  tests/            # pytest, 38 个测试
+  examples/         # run_memory_demo.py
+  docs/             # 设计与开发文档(见下)
+  src/              # JS v0 参考实现(不再维护)
+  .github/workflows/ci.yml
+  pyproject.toml    # pytest + mypy 配置
 ```
+
+文档:
+
+- `docs/development-log.md` — 加固开发日志 + 遗留清单(路线图)。
+- `docs/response-policy-design.md` — 回复策略设计。
+- `docs/next-implementation-plan.md` — 后续阶段计划(持久化等)。
+- `docs/core-link.md` — 早期设计说明。
 
 ## 下一步可扩展方向
 
-- 把 `src/planner.js` 替换成真实 LLM planner。
-- 将 `MemoryStore` 从内存换成 SQLite/Postgres/Redis。
-- 为 tool execution 增加权限、超时、重试和审计。
-- 增加 human-in-the-loop 审批节点。
-- 增加 evaluator,让 agent 对最终结果做自检。
+详见 `docs/development-log.md` 的遗留清单,要点:
+
+- 记忆持久化(内存 -> JSON/SQLite)、记忆去重。
+- LLM 输出用 Ollama `format:json` 降低回退率。
+- global safety(请求级安全拦截)。
+- 生产化: Protocol 显式契约 + 中间件管道 + typed state。
