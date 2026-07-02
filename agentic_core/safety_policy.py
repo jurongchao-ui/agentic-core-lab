@@ -1,3 +1,20 @@
+"""safety_policy — 请求级全局安全拦截(规则版脚手架)。
+
+功能:
+  - RuleBasedSafetyPolicy 用一组可注入的 SafetyRule(正则)判断整轮请求是否有害。
+  - 命中即返回 refuse=True 的 SafetyDecision,带 category / risk_level / confidence /
+    matched_rule / metadata(可解释、可审计)。
+  - 结构化满足 contracts.SafetyPolicy; 规则法只是脚手架,日后可经同一协议 drop-in
+    LLM/moderation 版(仿 LlmMemoryPolicy 的 LLM+规则兜底)。
+  - 区别于 MemoryPolicy 的 local safety(敏感 PII 不保存): 这里是请求级,命中即拒整轮。
+
+调用关系图:
+  Agent.run(goal)
+      └─▶ SafetyPolicy.check(goal) ─▶ SafetyDecision
+            refuse=True: Agent 跳过记忆评估与整个 Plan-Act-Observe loop,
+                         ResponsePolicy 用 global_safety 顶档生成拒绝回复。
+"""
+
 from __future__ import annotations
 
 import re

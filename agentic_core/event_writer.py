@@ -1,3 +1,21 @@
+"""event_writer — 事件写入后端(内存 / JSONL / 组合)+ 脱敏。
+
+功能:
+  - EventWriter 协议 + 三个实现:
+      MemoryEventWriter    —— 写进程内 events 列表(默认,保持原行为)。
+      JsonlEventWriter     —— 追加写 data/events.jsonl,含按大小轮转 + 文件锁(fcntl,
+                              非 POSIX 平台降级无锁)。
+      CompositeEventWriter —— 多路写;单个 writer 抛错只记 warning,不影响用户主流程。
+  - build_event_writer_from_env 按 AGENTIC_EVENT_LOG* 环境变量装配 writer(默认仅内存)。
+  - redact_event / redact_value 复用 memory_policy.SENSITIVE_PATTERN 对 payload 递归脱敏,
+    避免项目里出现两套敏感规则。
+
+调用关系图:
+  MemoryStore(装配时)─▶ build_event_writer_from_env(events) ─▶ Memory / Jsonl / Composite writer
+  MemoryStore.record_event(...) ─▶ writer.write(EventRecord) ─▶ [内存列表 + JSONL(轮转/锁)]
+  下游读取: event_log 读 data/events.jsonl 重建时间线; eval_harness 统计事件指标。
+"""
+
 from __future__ import annotations
 
 import contextlib

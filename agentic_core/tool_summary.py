@@ -1,3 +1,17 @@
+"""tool_summary — 工具执行结果 -> 文案的单一真相源。
+
+功能:
+  - summarize_tool_trace(goal, trace) 把一轮的工具 observation 汇总成三份文案:
+      success_text / failure_text(给用户看的自然语言)、lines(给 debug/兜底看的条目)。
+  - 处理"计算失败则不写依赖它的笔记"这类跨工具依赖判断。
+  - 新增工具时只改这里,避免 ResponsePolicy 和 Planner 各写一套汇总而漂移。
+
+调用关系图:
+  ResponsePolicy.decide ─────────┐
+  RuleBasedPlanner.build_answer ─┴─▶ summarize_tool_trace(goal, trace) ─▶ ToolTraceSummary
+                                        (输入: list[TraceStep])
+"""
+
 from __future__ import annotations
 
 import re

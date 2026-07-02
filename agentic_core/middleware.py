@@ -1,3 +1,19 @@
+"""middleware — 工具调用的横切中间件管道。
+
+功能:
+  - MiddlewarePipeline 在每次工具执行的前/后按顺序运行一组 ToolMiddleware。
+  - before_tool 返回 Observation 即"短路"(不执行工具,直接用该结果);
+    after_tool 可查看或改写工具执行结果。
+  - 内置 ApprovalMiddleware(需审批工具未批准则拦截)、CostAccountingMiddleware(累计成本,不阻断)。
+  - 这是审批 / 成本 / 未来限流、重试等生产级横切逻辑的统一挂载点。
+
+调用关系图:
+  Agent(Plan-Act-Observe loop, 工具执行处)
+      ├─▶ MiddlewarePipeline.before_tool(ctx) ─▶ [Approval → Cost → ...] ─▶ 放行 or 短路 Observation
+      ├─▶ ToolRegistry.execute(...)                (仅在放行时执行)
+      └─▶ MiddlewarePipeline.after_tool(ctx, obs) ─▶ 逆序过一遍 ─▶ 最终 Observation
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field

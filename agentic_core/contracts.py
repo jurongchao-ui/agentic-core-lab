@@ -1,3 +1,18 @@
+"""contracts — 角色的显式 Protocol 契约 + PlannerContext。
+
+功能:
+  - 用结构类型(Protocol)定义每个可替换角色的接口: Planner / MemoryPolicy /
+    Responder / ResponsePolicy / LlmClient / SafetyPolicy。实现无需继承,结构匹配即满足,
+    mypy 负责静态校验; @runtime_checkable 支持 isinstance 冒烟测试。
+  - PlannerContext(dataclass): planner 每步能看到的上下文。只给 MemorySnapshot,
+    不给 MemoryStore —— planner 只能读快照,不能直接改记忆。
+
+调用关系图:
+  agent / tools / planner / responder / memory_policy / safety_policy(各实现)
+      └─ 按协议类型标注/装配 ─▶ contracts(只定义契约,不含实现)
+  contracts ── 引用数据类型 ──▶ schemas(Action/MemoryDecision/...), response_policy(ResponseContext/...)
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass

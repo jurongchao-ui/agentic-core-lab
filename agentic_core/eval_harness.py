@@ -1,3 +1,21 @@
+"""eval_harness — 确定性行为评测(黄金用例 + 指标统计)。
+
+功能:
+  - EvalCase 声明输入(goal / setup_goals)和期望(工具 / 答案片段 / 记忆保存数 /
+    安全拒绝),让 eval 不只是打印结果、而是能判断好坏。
+  - run_eval 用规则版 planner/policy(离线确定性,不依赖 Ollama)跑一组用例。
+  - collect_run_metrics / _aggregate_metrics 从事件流统计工具成功率、planner fallback、
+    safety 拒绝、memory 保存、平均 step 等行为指标(可用于跨版本对比)。
+  - 命令行入口: python -m agentic_core.eval_harness [--json]; 有失败则退出码非 0(可进 CI)。
+
+调用关系图:
+  CLI: python -m agentic_core.eval_harness
+      └─▶ run_eval(cases) ─▶ run_eval_case ─▶ Agent.run_typed(goal) ─▶ AgentRunResult
+                                            ├─▶ _check_expectations(case, result)   # 断言
+                                            └─▶ collect_run_metrics(result)         # 指标
+      └─▶ format_eval_report / EvalReport.to_dict
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -201,10 +219,14 @@ def format_eval_report(report: EvalReport) -> str:
 
 
 def _check_expectations(case: EvalCase, result: AgentRunResult) -> list[str]:
+    """逐条比对期望与实际,返回失败描述列表(空列表 = 通过)。"""
     failures: list[str] = []
+
+    # 1) 运行状态: completed / refused / failed。
     if result.status != case.expected_status:
         failures.append(f"status expected {case.expected_status}, got {result.status}")
 
+    # 2) 工具调用: 期望的工具都被调用; 若期望"零工具",出现任何工具都算失败。
     tool_names = _tool_names(result)
     for tool_name in case.expected_tools:
         if tool_name not in tool_names:
@@ -213,15 +235,18 @@ def _check_expectations(case: EvalCase, result: AgentRunResult) -> list[str]:
     if case.expected_tools == [] and unexpected_tools:
         failures.append(f"unexpected tool calls: {unexpected_tools}")
 
+    # 3) 最终答案必须包含指定片段(子串匹配,避免绑死整句文案)。
     for text in case.expected_answer_contains:
         if text not in result.answer:
             failures.append(f"answer missing text: {text}")
 
+    # 4) 长期记忆保存次数(用 memory_saved 事件计数,而非快照,避免受去重影响)。
     if case.expected_memory_saves is not None:
         saved_count = _event_counts(result).get("memory_saved", 0)
         if saved_count != case.expected_memory_saves:
             failures.append(f"memory_saved expected {case.expected_memory_saves}, got {saved_count}")
 
+    # 5) 是否被安全策略拒绝。
     if case.expected_safety_refusal is not None:
         refused = result.safety_decision.refuse
         if refused != case.expected_safety_refusal:

@@ -1,3 +1,18 @@
+"""event_log — JSONL 事件的读取 / 过滤 / 时间线展示(排障工具,只读)。
+
+功能:
+  - read_jsonl_events 读取 events.jsonl(默认连同轮转备份 .1/.2…),坏行降级成
+    invalid_jsonl_line 事件而非崩溃 —— reader 只检查/展示,不修改历史事件。
+  - filter_events_by_run_id / list_run_ids / format_timeline 按 runId 重建人读时间线。
+  - _summarize_event 针对每种事件类型给一行摘要(safety/memory/planner/tool/response…)。
+  - 命令行入口: python -m agentic_core.event_log [--run-id … | --current-only | --json]。
+
+调用关系图:
+  CLI: python -m agentic_core.event_log
+      └─▶ read_jsonl_events(path) ─▶ filter_events_by_run_id / list_run_ids ─▶ format_timeline
+  数据来源: event_writer.JsonlEventWriter 写出的 data/events.jsonl(+ 轮转备份)。
+"""
+
 from __future__ import annotations
 
 import argparse
