@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+import re
 from typing import Any
 
 from .contracts import (
@@ -11,22 +12,33 @@ from .contracts import (
     ResponsePolicy,
     SafetyPolicy,
 )
-from .memory import MemoryStore
+from .memory import MemoryStore, now_iso
+from .middleware import MiddlewarePipeline, ToolCallContext
 from .response_policy import ResponseContext, ResponseDecision, RuleBasedResponsePolicy
 from .safety_policy import RuleBasedSafetyPolicy
-from .schemas import MemoryDecision, Observation, SafetyDecision
+from .schemas import (
+    Action,
+    AgentRunResult,
+    AgentRunState,
+    MemoryDecision,
+    MemoryRecord,
+    Observation,
+    RunStatus,
+    SafetyDecision,
+    TraceStep,
+    skipped_memory_decision,
+)
 from .tools import ToolRegistry
 
 
 class Agent:
     """Agent 是整个应用的“总导演”。
 
-    它自己不负责理解自然语言,也不直接做计算/写笔记。
-    它只负责编排这条核心链路:
+    它负责编排:
 
-        用户目标 -> 记忆判断 -> Planner 选动作 -> Tool 执行 -> 观察结果 -> 再规划/结束
+        用户目标 -> 安全判断 -> 记忆判断 -> Planner 选动作 -> Tool 执行 -> 观察结果 -> 最终回复
 
-    这就是 agentic application 里常说的 Plan-Act-Observe loop。
+    run_typed() 是 typed 主入口; run() 只是为了兼容 CLI/Chat 的 dict 输出。
     """
 
     def __init__(
@@ -39,260 +51,311 @@ class Agent:
         responder: Responder | None = None,
         response_policy: ResponsePolicy | None = None,
         safety_policy: SafetyPolicy | None = None,
+        middleware_pipeline: MiddlewarePipeline | None = None,
     ) -> None:
-        # planner: 决定下一步做什么。可以是 HermesPlanner,也可以是 RuleBasedPlanner。
         self.planner = planner
-
-        # responder: 当本轮没有调用任何工具(纯闲聊/陈述)时,用它生成自然语言回复。
-        # 可以为 None(例如离线 demo),此时闲聊仍走 planner 的任务报告模板。
         self.responder = responder
-
-        # response_policy: 最终回复仲裁层。它决定“该追问、确认记忆、总结工具,
-        # 还是交给 responder”,避免 responder 覆盖已经发生的系统事实。
         self.response_policy = response_policy or RuleBasedResponsePolicy()
-
-        # safety_policy: 请求级全局安全拦截。命中即拒绝整轮,跳过记忆评估和 loop。
         self.safety_policy = safety_policy or RuleBasedSafetyPolicy()
-
-        # tools: 工具注册表。Agent 不知道每个工具内部怎么实现,只按名字调用。
         self.tools = tools
-
-        # memory: 保存笔记、待办、长期记忆、事件日志。
         self.memory = memory
-
-        # memory_policy: 判断一句话是否值得进入长期记忆。
         self.memory_policy = memory_policy
-
-        # max_steps 防止 agent 无限循环。例如模型一直不 final,最多也只跑 8 步。
         self.max_steps = max_steps
+        self.middleware_pipeline = middleware_pipeline or MiddlewarePipeline.default()
 
     def run(self, goal: str) -> dict[str, Any]:
-        """运行一次 agent 任务。
+        """兼容旧入口: 返回 CLI/Chat 已经习惯的 dict 结构。"""
 
-        参数:
-            goal: 用户输入的目标,例如“帮我计算 128 * 7, 然后记录成学习笔记”。
+        return self.run_typed(goal).to_dict()
 
-        返回:
-            一个 dict,里面包含最终回答、trace、memory snapshot。
+    def run_typed(self, goal: str) -> AgentRunResult:
+        """运行一次 agent 任务,并返回 typed result。
 
-        初学者提示:
-            dict[str, Any] 是 Python 类型标注,意思是“key 是字符串,value 可以是任意类型”。
-            类型标注不会改变运行逻辑,主要帮助人和编辑器理解代码。
+        初学者可以把 AgentRunState 理解成“本次运行的工作台”:
+        trace、已保存记忆、当前状态都先放在这里,最后再打包成 AgentRunResult。
         """
 
-        # run_id 用时间戳生成,用于把本次任务里的事件串起来。
         run_id = f"run_{int(time.time() * 1000)}"
-
-        # trace 是 agent 的执行轨迹。每一步 action 和 observation 都会放进这里。
-        # 后续 planner 会读取 trace,判断“已经做过什么,下一步该做什么”。
-        trace: list[dict[str, Any]] = []
-
-        # 0. 全局安全拦截: 有害请求直接拒绝整轮,跳过记忆评估和 loop。
-        safety_decision = self.safety_policy.check(goal)
-        if safety_decision.refuse:
-            neutral = MemoryDecision(
-                save=False, memory_type="none", text="", reason="被安全策略拦截", scores={}
+        state = AgentRunState(
+            run_id=run_id,
+            goal=goal,
+            status="running",
+            started_at=now_iso(),
+        )
+        self._record_event(state, "run_started", {"goal": goal})
+        safety_decision = SafetyDecision(refuse=False, category="none", reason="not checked")
+        memory_decision: MemoryDecision | None = None
+        try:
+            return self._run_typed_body(state, goal, safety_decision, memory_decision)
+        except Exception as error:
+            return self._build_failed_result(
+                state,
+                goal,
+                state.safety_decision or safety_decision,
+                state.memory_decision or memory_decision,
+                error,
             )
+
+    def _run_typed_body(
+        self,
+        state: AgentRunState,
+        goal: str,
+        safety_decision: SafetyDecision,
+        memory_decision: MemoryDecision | None,
+    ) -> AgentRunResult:
+        """run_typed 的主体逻辑。
+
+        外层 run_typed 负责兜底 run_failed,这里专注正常链路。
+        """
+
+        safety_decision = self.safety_policy.check(goal)
+        state.safety_decision = safety_decision
+        self._record_event(
+            state,
+            "safety_decision",
+            {"safety": safety_decision.to_dict()},
+        )
+        if safety_decision.refuse:
             response_decision = self._decide_response(
                 goal=goal,
-                memory_decision=neutral,
+                memory_decision=None,
                 saved_memories=[],
-                trace=trace,
+                trace=state.trace,
                 planner_answer=None,
                 incomplete_reason=None,
                 safety_decision=safety_decision,
             )
-            self.memory.record_event(
+            self._record_event(
+                state,
+                "safety_refusal",
                 {
-                    "runId": run_id,
-                    "type": "safety_refusal",
                     "safety": safety_decision.to_dict(),
                     "answer": response_decision.text,
-                }
+                },
             )
-            return {
-                "runId": run_id,
-                "answer": response_decision.text,
-                "memoryDecision": neutral.to_dict(),
-                "safetyDecision": safety_decision.to_dict(),
-                "responseDecision": response_decision.to_dict(),
-                "trace": trace,
-                "memory": self.memory.snapshot(),
-            }
+            return self._build_result(
+                state=state,
+                status="refused",
+                answer=response_decision.text,
+                safety_decision=safety_decision,
+                memory_decision=None,
+                response_decision=response_decision,
+            )
 
-        # 第一步先做记忆判断。
-        # 注意: 这一步不是让模型自由决定,而是交给 MemoryPolicy 的规则层。
         memory_decision = self.memory_policy.evaluate(goal)
-        saved_memories: list[dict[str, Any]] = []
+        state.memory_decision = memory_decision
+        self._record_event(
+            state,
+            "memory_decision",
+            {"decision": memory_decision.to_dict(), "savedMemory": None},
+        )
 
         if memory_decision.needs_clarification:
-            # 用户明确要求保存长期记忆,但没有提供具体内容时,直接追问。
-            # 这一步必须发生在 planner 之前,避免模型或规则 planner 编造用户资料。
             response_decision = self._decide_response(
                 goal=goal,
                 memory_decision=memory_decision,
-                saved_memories=saved_memories,
-                trace=trace,
+                saved_memories=state.saved_memories,
+                trace=state.trace,
                 planner_answer=None,
                 incomplete_reason=None,
                 safety_decision=safety_decision,
             )
-            self.memory.record_event(
+            self._record_event(
+                state,
+                "memory_clarification",
                 {
-                    "runId": run_id,
-                    "type": "memory_clarification",
                     "decision": memory_decision.to_dict(),
                     "responseDecision": response_decision.to_dict(),
                     "answer": response_decision.text,
-                }
+                },
             )
-            return {
-                "runId": run_id,
-                "answer": response_decision.text,
-                "memoryDecision": memory_decision.to_dict(),
-                "safetyDecision": safety_decision.to_dict(),
-                "responseDecision": response_decision.to_dict(),
-                "trace": trace,
-                "memory": self.memory.snapshot(),
-            }
+            return self._build_result(
+                state=state,
+                status="clarification",
+                answer=response_decision.text,
+                safety_decision=safety_decision,
+                memory_decision=memory_decision,
+                response_decision=response_decision,
+            )
 
+        saved_memory: MemoryRecord | None = None
         if memory_decision.save:
-            # 如果 MemoryPolicy 判断值得保存,就写入长期记忆。
-            # 例如“以后安排学习任务时，每次控制在30分钟以内”。
             saved_memory = self.memory.add_long_term_memory(
                 memory_type=memory_decision.memory_type,
                 text=memory_decision.text,
                 reason=memory_decision.reason,
                 scores=memory_decision.scores,
             )
-            saved_memories.append(saved_memory)
-        else:
-            # 如果只是临时状态,例如“我今天有点累”,就不保存。
-            saved_memory = None
+            state.saved_memories.append(saved_memory)
+            self._record_event(
+                state,
+                "memory_saved",
+                {"savedMemory": saved_memory.to_dict()},
+            )
 
-        # 不管是否保存,都记录一次 memory_decision 事件。
-        # 这对学习和调试很重要: 我们能看到系统为什么保存/不保存。
-        self.memory.record_event(
-            {
-                "runId": run_id,
-                "type": "memory_decision",
-                "decision": memory_decision.to_dict(),
-                "savedMemory": saved_memory,
-            }
-        )
+        if self._should_skip_planner(goal, memory_decision, state.saved_memories):
+            response_decision = self._decide_response(
+                goal=goal,
+                memory_decision=memory_decision,
+                saved_memories=state.saved_memories,
+                trace=state.trace,
+                planner_answer=None,
+                incomplete_reason=None,
+                safety_decision=safety_decision,
+            )
+            self._record_event(
+                state,
+                "planner_skipped",
+                {
+                    "reason": "No tool intent detected; response can be resolved by ResponsePolicy/responder.",
+                    "responseDecision": response_decision.to_dict(),
+                },
+            )
+            self._record_event(
+                state,
+                "response_decision",
+                {
+                    "answer": response_decision.text,
+                    "responseDecision": response_decision.to_dict(),
+                },
+            )
+            return self._build_result(
+                state=state,
+                status="completed",
+                answer=response_decision.text,
+                safety_decision=safety_decision,
+                memory_decision=memory_decision,
+                response_decision=response_decision,
+            )
 
-        # Plan-Act-Observe loop:
-        # 每一轮让 planner 选择一个 action,然后 Agent 执行它。
         for step in range(1, self.max_steps + 1):
-            # context 是 planner 做决策时能看到的“上下文包”。
-            # 里面有用户目标、当前第几步、历史 trace、记忆、可用工具列表。
-            context: PlannerContext = {
-                "run_id": run_id,
-                "goal": goal,
-                "step": step,
-                "trace": trace,
-                "memory": self.memory,
-                "available_tools": self.tools.list(),
-            }
-
-            # planner.next(context) 会返回一个 Action:
-            # - type == "tool": 说明下一步要调用工具
-            # - type == "final": 说明任务完成,可以回答用户
+            state.step = step
+            context = PlannerContext(
+                run_id=state.run_id,
+                goal=goal,
+                step=step,
+                trace=state.trace,
+                memory_snapshot=self.memory.snapshot(touch_long_term=True),
+                available_tools=self.tools.list(),
+            )
             action = self.planner.next(context)
+            self._record_event(
+                state,
+                "planner_action",
+                {"step": step, "action": action.to_dict()},
+            )
+            if action.source == "rule_fallback":
+                self._record_event(
+                    state,
+                    "planner_fallback",
+                    {
+                        "step": step,
+                        "action": action.to_dict(),
+                        "reason": action.reason,
+                        "metadata": action.metadata,
+                    },
+                )
 
             if action.type == "final":
-                # final action 不再调用工具。
-                # 最终回答统一交给 ResponsePolicy 仲裁。
-                # 普通闲聊可以由 responder 生成;工具结果、记忆确认、失败说明不能被覆盖。
-                planner_answer = action.answer if (trace or self.responder is None) else None
+                planner_answer = action.answer if (state.trace or self.responder is None) else None
                 response_decision = self._decide_response(
                     goal=goal,
                     memory_decision=memory_decision,
-                    saved_memories=saved_memories,
-                    trace=trace,
+                    saved_memories=state.saved_memories,
+                    trace=state.trace,
                     planner_answer=planner_answer,
                     incomplete_reason=None,
                     safety_decision=safety_decision,
                 )
-                self.memory.record_event(
+                self._record_event(
+                    state,
+                    "response_decision",
                     {
-                        "runId": run_id,
-                        "type": "final",
                         "answer": response_decision.text,
                         "responseDecision": response_decision.to_dict(),
-                    }
+                    },
                 )
-                return {
-                    "runId": run_id,
-                    "answer": response_decision.text,
-                    "memoryDecision": memory_decision.to_dict(),
-                    "safetyDecision": safety_decision.to_dict(),
-                    "responseDecision": response_decision.to_dict(),
-                    "trace": trace,
-                    "memory": self.memory.snapshot(),
-                }
+                return self._build_result(
+                    state=state,
+                    status="completed",
+                    answer=response_decision.text,
+                    safety_decision=safety_decision,
+                    memory_decision=memory_decision,
+                    response_decision=response_decision,
+                )
 
-            # 如果 action 不是 final,那它就是 tool action。
-            # started_at 用来计算工具耗时。
             started_at = time.time()
-            observation = self._execute_action(action, started_at)
-
-            # observation 是工具执行后的结果:
-            # - ok=True 表示成功
-            # - ok=False 表示失败,错误信息在 error 里
-            trace_item = {
-                "step": step,
-                "action": action.to_dict(),
-                "observation": observation.to_dict(),
-            }
-            trace.append(trace_item)
+            self._record_event(
+                state,
+                "tool_started",
+                {"step": step, "action": action.to_dict()},
+            )
+            observation = self._execute_action(state, action, started_at)
+            trace_step = TraceStep(
+                step=step,
+                action=action,
+                observation=observation,
+                created_at=now_iso(),
+            )
+            state.trace.append(trace_step)
 
             if action.tool_name == "memory.add" and observation.ok:
-                output = observation.output or {}
-                if output.get("saved") and output.get("memory"):
-                    saved_memories.append(output["memory"])
+                self._collect_memory_add_result(state, observation)
 
-            # 事件日志和 trace 类似,但它存在 memory 里,用于最后 snapshot 展示。
-            self.memory.record_event(
-                {"runId": run_id, "step": step, "action": action.to_dict(), "observation": observation.to_dict()}
+            self._record_event(
+                state,
+                "tool_observation",
+                {
+                    "step": step,
+                    "action": action.to_dict(),
+                    "observation": observation.to_dict(),
+                },
             )
 
-        # 如果循环跑满 max_steps 还没有 final,说明任务没有正常结束。
         incomplete_reason = f"达到最大步数 {self.max_steps},任务未能自动完成。"
         response_decision = self._decide_response(
             goal=goal,
             memory_decision=memory_decision,
-            saved_memories=saved_memories,
-            trace=trace,
+            saved_memories=state.saved_memories,
+            trace=state.trace,
             planner_answer=None,
             incomplete_reason=incomplete_reason,
             safety_decision=safety_decision,
         )
-        return {
-            "runId": run_id,
-            "answer": response_decision.text,
-            "memoryDecision": memory_decision.to_dict(),
-            "safetyDecision": safety_decision.to_dict(),
-            "responseDecision": response_decision.to_dict(),
-            "trace": trace,
-            "memory": self.memory.snapshot(),
-        }
+        self._record_event(
+            state,
+            "response_decision",
+            {
+                "answer": response_decision.text,
+                "responseDecision": response_decision.to_dict(),
+                "incompleteReason": incomplete_reason,
+            },
+        )
+        return self._build_result(
+            state=state,
+            status="incomplete",
+            answer=response_decision.text,
+            safety_decision=safety_decision,
+            memory_decision=memory_decision,
+            response_decision=response_decision,
+        )
 
     def _decide_response(
         self,
         goal: str,
-        memory_decision: MemoryDecision,
-        saved_memories: list[dict[str, Any]],
-        trace: list[dict[str, Any]],
+        memory_decision: MemoryDecision | None,
+        saved_memories: list[MemoryRecord],
+        trace: list[TraceStep],
         planner_answer: str | None,
         incomplete_reason: str | None,
         safety_decision: SafetyDecision | None = None,
     ) -> ResponseDecision:
         """创建 ResponseContext,交给 ResponsePolicy 生成最终回复。"""
+
         return self.response_policy.decide(
             ResponseContext(
                 goal=goal,
-                memory_decision=memory_decision,
+                memory_decision=memory_decision or skipped_memory_decision(),
                 saved_memories=list(saved_memories),
                 trace=trace,
                 planner_answer=planner_answer,
@@ -303,21 +366,163 @@ class Agent:
             )
         )
 
-    def _execute_action(self, action: Any, started_at: float) -> Observation:
-        """执行一个 tool action,并把结果包装成 Observation。
+    def _execute_action(self, state: AgentRunState, action: Action, started_at: float) -> Observation:
+        """执行一个 tool action,并把结果包装成 Observation。"""
 
-        这里用 try/except 很关键:
-        工具失败不应该让整个程序崩溃,而是变成 observation 交给下一轮 planner。
-        这就是 Observe 的价值: agent 可以根据失败结果重新计划。
-        """
         try:
             if not action.tool_name:
                 raise ValueError("tool action requires tool_name")
+            tool = self.tools.get_spec(action.tool_name)
+            if not tool:
+                raise ValueError(f"unknown tool: {action.tool_name}")
+            context = ToolCallContext(
+                run_id=state.run_id,
+                step=state.step,
+                action=action,
+                tool=tool,
+            )
+            short_circuit = self.middleware_pipeline.before_tool(context)
+            if short_circuit is not None:
+                return short_circuit
             output = self.tools.execute(action.tool_name, action.input)
-            return Observation(ok=True, output=output, elapsed_ms=int((time.time() - started_at) * 1000))
+            observation = Observation(
+                ok=True,
+                output=output,
+                elapsed_ms=int((time.time() - started_at) * 1000),
+            )
+            return self.middleware_pipeline.after_tool(context, observation)
         except Exception as error:
             return Observation(
                 ok=False,
                 error=str(error),
                 elapsed_ms=int((time.time() - started_at) * 1000),
             )
+
+    def _should_skip_planner(
+        self,
+        goal: str,
+        memory_decision: MemoryDecision,
+        saved_memories: list[MemoryRecord],
+    ) -> bool:
+        """判断本轮是否可以不进入 Planner。
+
+        Planner 负责工具规划。若用户只是闲聊、陈述偏好、保存长期记忆或触发 local safety,
+        ResponsePolicy/responder 已经能生成最终回复,不必再额外调用 LLM planner。
+        """
+
+        tool_intent_patterns = [
+            r"\d+(?:\s*[+\-*/%]\s*\d+)+",
+            r"记录|笔记|note",
+            r"添加待办|新增待办|todo",
+            r"列出待办|查看待办|list todo",
+            r"学习计划|学习安排|学习规划|study plan",
+        ]
+        has_tool_intent = any(re.search(pattern, goal, re.I) for pattern in tool_intent_patterns)
+        if has_tool_intent:
+            return False
+        has_direct_response_content = bool(saved_memories) or memory_decision.scores.get("sensitivity_risk", 0) >= 3
+        return self.responder is not None or has_direct_response_content
+
+    def _collect_memory_add_result(self, state: AgentRunState, observation: Observation) -> None:
+        """memory.add 工具成功后,把真实写入的 MemoryRecord 加入 saved_memories。"""
+
+        output = observation.output or {}
+        if not isinstance(output, dict) or not output.get("saved"):
+            return
+        memory_data = output.get("memory") or {}
+        memory_id = memory_data.get("id")
+        for memory in self.memory.long_term_memories:
+            if memory.id == memory_id:
+                state.saved_memories.append(memory)
+                return
+
+    def _record_event(
+        self,
+        state: AgentRunState,
+        event_type: str,
+        payload: dict[str, Any],
+        level: str = "info",
+    ) -> None:
+        event = self.memory.record_event(
+            event_type=event_type,
+            run_id=state.run_id,
+            payload=payload,
+            level=level,
+        )
+        state.events.append(event)
+
+    def _build_result(
+        self,
+        state: AgentRunState,
+        status: RunStatus,
+        answer: str,
+        safety_decision: SafetyDecision,
+        memory_decision: MemoryDecision | None,
+        response_decision: ResponseDecision,
+    ) -> AgentRunResult:
+        state.status = status
+        self._record_event(
+            state,
+            "run_completed",
+            {"status": status, "answer": answer},
+        )
+        return AgentRunResult(
+            run_id=state.run_id,
+            goal=state.goal,
+            status=status,
+            answer=answer,
+            safety_decision=safety_decision,
+            memory_decision=memory_decision,
+            response_decision=response_decision,
+            trace=list(state.trace),
+            memory_snapshot=self.memory.snapshot(),
+            events=list(state.events),
+            started_at=state.started_at,
+            completed_at=now_iso(),
+        )
+
+    def _build_failed_result(
+        self,
+        state: AgentRunState,
+        goal: str,
+        safety_decision: SafetyDecision,
+        memory_decision: MemoryDecision | None,
+        error: Exception,
+    ) -> AgentRunResult:
+        """未预期异常兜底。
+
+        生产级 agent 不能让异常悄悄吞掉事件链。
+        这里保证至少写出 run_failed,并返回结构化 failed 结果。
+        """
+
+        state.status = "failed"
+        answer = "抱歉，当前任务执行失败，已记录失败事件，方便后续排查。"
+        response_decision = ResponseDecision(
+            text=answer,
+            tiers=["run_failed"],
+            reason=f"Agent run failed: {error}",
+        )
+        self._record_event(
+            state,
+            "run_failed",
+            {
+                "error": str(error),
+                "errorType": error.__class__.__name__,
+                "goal": goal,
+            },
+            level="error",
+        )
+        return AgentRunResult(
+            run_id=state.run_id,
+            goal=state.goal,
+            status="failed",
+            answer=answer,
+            safety_decision=safety_decision,
+            memory_decision=memory_decision,
+            response_decision=response_decision,
+            trace=list(state.trace),
+            memory_snapshot=self.memory.snapshot(),
+            events=list(state.events),
+            started_at=state.started_at,
+            completed_at=now_iso(),
+        )

@@ -15,7 +15,11 @@ class FakeClient:
         self._content = content
         self._error = error
 
-    def chat(self, messages: list[dict[str, str]]) -> dict[str, Any]:
+    def chat(
+        self,
+        messages: list[dict[str, str]],
+        format_json: bool = False,
+    ) -> dict[str, Any]:
         if self._error is not None:
             raise self._error
         return {"message": {"content": self._content}}
@@ -43,6 +47,11 @@ class StubPlanner:
         return Action.final("模板报告(不该被用户看到)", "no tool needed")
 
 
+class ExplodingPlanner:
+    def next(self, context: dict[str, Any]) -> Action:
+        raise AssertionError("planner should not be called for conversational turns")
+
+
 class StubResponder:
     def reply(self, goal: str, memory_snapshot: dict[str, Any]) -> str:
         return f"自然回复: {goal}"
@@ -62,9 +71,17 @@ def build_agent(planner: Any, responder: Any) -> Agent:
 
 def test_agent_uses_responder_for_conversational_turn() -> None:
     """本轮没调用工具 => 用 responder 的自然回复,而不是 planner 的任务报告。"""
-    agent = build_agent(StubPlanner(), StubResponder())
+    agent = build_agent(ExplodingPlanner(), StubResponder())
     result = agent.run("你好，你觉得学习 agentic 难吗")
     assert result["answer"] == "自然回复: 你好，你觉得学习 agentic 难吗"
+    assert [event["type"] for event in result["events"]] == [
+        "run_started",
+        "safety_decision",
+        "memory_decision",
+        "planner_skipped",
+        "response_decision",
+        "run_completed",
+    ]
 
 
 def test_agent_without_responder_keeps_planner_answer() -> None:
@@ -72,3 +89,11 @@ def test_agent_without_responder_keeps_planner_answer() -> None:
     agent = build_agent(StubPlanner(), None)
     result = agent.run("你好")
     assert result["answer"] == "模板报告(不该被用户看到)"
+
+
+def test_memory_confirmation_can_skip_planner() -> None:
+    agent = build_agent(ExplodingPlanner(), StubResponder())
+    result = agent.run("以后安排学习任务时，每次控制在30分钟以内")
+
+    assert "已记住" in result["answer"]
+    assert "planner_skipped" in [event["type"] for event in result["events"]]

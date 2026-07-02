@@ -11,20 +11,48 @@ from .memory import MemoryStore
 from .memory_policy import SENSITIVE_PATTERN
 
 
+SideEffect = Literal["read", "write"]
+RiskLevel = Literal["low", "medium", "high"]
+
+
 @dataclass
 class ToolSpec:
     """一个工具的类型化定义(以前是松散 dict)。
 
-    side_effect 是元数据: read=只读, write=会写入记忆。v1 只记录+暴露给 planner,
-    暂不驱动敏感守卫(守卫仍走显式 guard_sensitive)。timeout/cost/approval 等留 v2。
+    生产级工具注册表不能只知道“函数怎么调”,还要知道:
+    权限 scope、超时、成本、副作用、是否需要审批。
+    当前阶段先把这些元数据结构化暴露出来,后续 Middleware/Safety 可以直接消费。
     """
 
     name: str
     description: str
     execute: Callable[[dict[str, Any]], Any]
     input_schema: dict[str, dict[str, Any]]
-    side_effect: Literal["read", "write"]
+    side_effect: SideEffect
     guard_sensitive: bool = False
+    permission_scope: str = "tool:read"
+    timeout_ms: int = 1000
+    cost_units: int = 1
+    risk_level: RiskLevel = "low"
+    requires_approval: bool = False
+    version: str = "1.0"
+
+    def to_public_dict(self) -> dict[str, Any]:
+        """返回给 Planner/审计系统看的工具元数据。"""
+
+        return {
+            "name": self.name,
+            "description": self.description,
+            "inputSchema": self.input_schema,
+            "sideEffect": self.side_effect,
+            "permissionScope": self.permission_scope,
+            "timeoutMs": self.timeout_ms,
+            "costUnits": self.cost_units,
+            "riskLevel": self.risk_level,
+            "requiresApproval": self.requires_approval,
+            "guardSensitive": self.guard_sensitive,
+            "version": self.version,
+        }
 
 
 class ToolRegistry:
@@ -59,19 +87,16 @@ class ToolRegistry:
         只暴露 name / description / inputSchema,不暴露 Python 函数本身。
         inputSchema 是本工具参数的唯一真相源: planner 的 prompt 提示和参数校验都从这里派生。
         """
-        return [
-            {
-                "name": spec.name,
-                "description": spec.description,
-                "inputSchema": spec.input_schema,
-                "sideEffect": spec.side_effect,
-            }
-            for spec in self._tools.values()
-        ]
+        return [spec.to_public_dict() for spec in self._tools.values()]
 
     def has(self, name: str) -> bool:
         """判断工具是否存在。"""
         return name in self._tools
+
+    def get_spec(self, name: str) -> ToolSpec | None:
+        """读取工具定义,供 middleware/safety 使用。"""
+
+        return self._tools.get(name)
 
     def execute(self, name: str, input_data: dict[str, Any] | None = None) -> Any:
         """执行一个工具。
@@ -98,15 +123,21 @@ class ToolRegistry:
         description: str,
         execute: Callable[[dict[str, Any]], Any],
         input_schema: dict[str, dict[str, Any]] | None = None,
-        side_effect: Literal["read", "write"] = "read",
+        side_effect: SideEffect = "read",
         guard_sensitive: bool = False,
+        permission_scope: str | None = None,
+        timeout_ms: int = 1000,
+        cost_units: int = 1,
+        risk_level: RiskLevel = "low",
+        requires_approval: bool = False,
+        version: str = "1.0",
     ) -> None:
         """注册一个工具。
 
         input_schema 描述工具参数,格式为 字段名 -> spec,例如:
             {"expression": {"type": "string", "required": True}}
         这是该工具参数的唯一真相源,无参工具(如 todo.list)传空 dict。
-        side_effect: read/write; guard_sensitive: 是否在执行前拦截敏感输入。
+        其他字段是生产级治理元数据,当前先暴露,后续给 middleware/safety 消费。
         """
         self._tools[name] = ToolSpec(
             name=name,
@@ -115,6 +146,12 @@ class ToolRegistry:
             input_schema=input_schema or {},
             side_effect=side_effect,
             guard_sensitive=guard_sensitive,
+            permission_scope=permission_scope or _default_permission_scope(name, side_effect),
+            timeout_ms=timeout_ms,
+            cost_units=cost_units,
+            risk_level=risk_level,
+            requires_approval=requires_approval,
+            version=version,
         )
 
     def _register_defaults(self) -> None:
@@ -130,29 +167,54 @@ class ToolRegistry:
                 "result": safe_eval_arithmetic(str(input_data["expression"])),
             },
             {"expression": {"type": "string", "required": True}},
+            permission_scope="tool:calculator:read",
+            timeout_ms=500,
+            cost_units=1,
         )
         self._register(
             "note.add",
             "Persist a learning note into memory.",
             # input_data["text"] 如果不存在会抛 KeyError,
             # Agent 会捕获并记录为失败 observation。
-            lambda input_data: self.memory.add_note(str(input_data["text"])),
+            lambda input_data: self.memory.add_note(str(input_data["text"])).to_dict(),
             {"text": {"type": "string", "required": True}},
             side_effect="write",
             guard_sensitive=True,
+            permission_scope="memory:note:write",
+            timeout_ms=1000,
+            cost_units=2,
+            risk_level="medium",
         )
         self._register(
             "todo.add",
             "Add a todo item.",
-            lambda input_data: self.memory.add_todo(str(input_data["text"])),
+            lambda input_data: self.memory.add_todo(str(input_data["text"])).to_dict(),
             {"text": {"type": "string", "required": True}},
             side_effect="write",
             guard_sensitive=True,
+            permission_scope="memory:todo:write",
+            timeout_ms=1000,
+            cost_units=2,
+            risk_level="medium",
         )
         self._register(
             "todo.list",
             "List all todo items.",
-            lambda _input_data: self.memory.list_todos(),
+            lambda _input_data: [todo.to_dict() for todo in self.memory.list_todos()],
+            permission_scope="memory:todo:read",
+            timeout_ms=500,
+        )
+        self._register(
+            "study.plan",
+            "Create a focused study plan for a topic, respecting a max_minutes limit.",
+            self._study_plan,
+            {
+                "topic": {"type": "string", "required": True},
+                "max_minutes": {"type": "integer", "required": False},
+            },
+            permission_scope="study:plan:read",
+            timeout_ms=1000,
+            cost_units=1,
         )
         self._register(
             "memory.add",
@@ -160,6 +222,10 @@ class ToolRegistry:
             self._memory_add,
             {"text": {"type": "string", "required": True}},
             side_effect="write",
+            permission_scope="memory:long_term:write",
+            timeout_ms=1000,
+            cost_units=2,
+            risk_level="medium",
         )
 
     def _memory_add(self, input_data: dict[str, Any]) -> dict[str, Any]:
@@ -185,7 +251,38 @@ class ToolRegistry:
             reason=decision.reason,
             scores=decision.scores,
         )
-        return {"saved": True, "memory": memory}
+        return {"saved": True, "memory": memory.to_dict()}
+
+    def _study_plan(self, input_data: dict[str, Any]) -> dict[str, Any]:
+        """生成一个紧凑学习计划。
+
+        工具只做确定性计划生成,不读取用户原话。
+        max_minutes 由 planner 从当前目标或长期记忆里提取后传入。
+        """
+
+        topic = str(input_data["topic"]).strip()
+        max_minutes = _coerce_positive_int(input_data.get("max_minutes"), default=45)
+        step_minutes = max(5, min(15, max_minutes // 3 or max_minutes))
+        remaining = max_minutes
+        templates = [
+            f"梳理 {topic} 的核心概念",
+            f"运行一个 {topic} 相关的小实验",
+            f"复盘结果并记录一个可改进点",
+        ]
+        steps: list[str] = []
+        for index, title in enumerate(templates):
+            if remaining <= 0:
+                break
+            minutes = min(step_minutes, remaining)
+            if index == len(templates) - 1:
+                minutes = remaining
+            steps.append(f"{minutes} 分钟: {title}")
+            remaining -= minutes
+        return {
+            "topic": topic,
+            "maxMinutes": max_minutes,
+            "steps": steps,
+        }
 
 
 def _contains_sensitive(input_data: dict[str, Any]) -> bool:
@@ -194,6 +291,21 @@ def _contains_sensitive(input_data: dict[str, Any]) -> bool:
         isinstance(value, str) and SENSITIVE_PATTERN.search(value)
         for value in input_data.values()
     )
+
+
+def _coerce_positive_int(value: Any, default: int) -> int:
+    """把工具输入安全转成正整数。"""
+
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return default
+    return number if number > 0 else default
+
+
+def _default_permission_scope(name: str, side_effect: SideEffect) -> str:
+    operation = "write" if side_effect == "write" else "read"
+    return f"tool:{name}:{operation}"
 
 
 def safe_eval_arithmetic(expression: str) -> int | float:

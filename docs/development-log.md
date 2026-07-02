@@ -7,7 +7,9 @@ scope: agentic_core
 
 # Agentic Core 加固开发日志（2026-07-02）
 
-本轮围绕一次代码评审展开，逐条修掉了发现的问题，并按"每步小改动 → 跑测试 → 看过程"的方式推进。全部改动零新依赖，风格与既有的"规则层 + LLM 层 + 程序把关"一致。收尾状态：**pytest 38 passed**。
+本轮围绕一次代码评审展开，逐条修掉了发现的问题，并按"每步小改动 → 跑测试 → 看过程"的方式推进。全部改动零新依赖，风格与既有的"规则层 + LLM 层 + 程序把关"一致。
+
+后续又补齐了 Typed State、Persistent Event Log、JSON 记忆持久化、学习计划工具、Eval Harness、Tool Metadata、Middleware Pipeline、Memory Lifecycle、结构化 SafetyPolicy，以及 Ollama `format:"json"`。当前收尾状态：**pytest 113 passed / mypy success / eval harness 5 passed**。
 
 ---
 
@@ -65,33 +67,37 @@ scope: agentic_core
 
 ```text
 Agent.run(goal)
+  -> SafetyPolicy(check)            # 请求级全局安全拦截,命中即拒绝整轮
   -> MemoryPolicy(evaluate)         # 规则版 或 LLM版(程序把关+敏感一票否决)
-  -> [save long-term memory]
+  -> [save active long-term memory] # 精确去重 + 生命周期字段
   -> Plan-Act-Observe loop
        Planner(next)                # HermesPlanner(LLM) -> RuleBasedPlanner(兜底)
-       ToolRegistry.execute         # 写入类工具敏感守卫;单一 schema 真相源
+       MiddlewarePipeline           # 审批/成本等横切逻辑
+       ToolRegistry.execute         # 写入类工具敏感守卫;ToolSpec 治理元数据
        Observation
   -> ResponsePolicy.decide          # 拦截/组合/兜底分层,输出可审计 ResponseDecision
   -> Final Answer
 ```
 
-可观测：`AGENTIC_TRACE=brief` 打印记忆决策(llm/fallback)、每步动作/工具结果、回退原因+模型原始输出、ResponseDecision 的 tiers/reason。
+可观测：`AGENTIC_TRACE=brief` 打印记忆决策(llm/fallback)、每步动作/工具结果、回退原因+模型原始输出、ResponseDecision 的 tiers/reason。`AGENTIC_EVENT_LOG=jsonl` 可追加写入 JSONL 事件日志,`agentic_core.event_log` 可按 runId 查看时间线。JSONL 写入默认启用同名 `.lock` 文件,保护大小轮转和追加写入;事件查看默认读取轮转备份,也可用 `--current-only` 只看当前文件。
 
-新增模块：`memory_policy.LlmMemoryPolicy` / `response_policy` / `responder` / `trace_view` / `json_utils`。
+新增模块：`memory_policy.LlmMemoryPolicy` / `response_policy` / `responder` / `trace_view` / `json_utils` / `event_writer` / `event_log` / `eval_harness` / `middleware`。
 
-环境开关：`AGENTIC_MODEL` / `AGENTIC_PLANNER` / `AGENTIC_MEMORY_POLICY` / `AGENTIC_TRACE`（+ 兼容 `AGENTIC_CHAT_DEBUG`）。
+环境开关：`AGENTIC_MODEL` / `AGENTIC_PLANNER` / `AGENTIC_MEMORY_POLICY` / `AGENTIC_TRACE` / `AGENTIC_MEMORY_STORE` / `AGENTIC_MEMORY_PATH` / `AGENTIC_EVENT_LOG` / `AGENTIC_EVENT_LOG_PATH` / `AGENTIC_EVENT_LOG_LOCK`（+ 兼容 `AGENTIC_CHAT_DEBUG`）。
 
 ---
 
 ## 遗留 / 未做（按优先级）
 
-- **[高] 目录不是 git 仓库**：这么多安全相关改动零版本记录，建议尽早 `git init` 固化基线。
-- **[中] `build_answer` 重复且近乎死代码**：`ResponsePolicy._summarize_tools` 与 planner 的 `build_answer` 两套工具汇总，且后者在新流程下 tier 6 几乎不可达。建议删或复用，二选一。
-- **[中] `planner_answer` 档名存实亡**：有 responder 时闲聊轮会 null 掉它并走 responder，LLM planner 自己的 final.answer 永远被丢弃；且闲聊轮有两次 LLM 调用。
-- **[中] 记忆去重**：agent 层保存 + memory.add 工具保存会产生重复长期记忆（ResponsePolicy 只是不重复播报，存储层未去重）。
-- **[中] 持久化**：记忆仍在进程内，退出即失（roadmap Phase 2 的 JsonMemoryStore 未做）。
-- **[中] LLM planner 在小模型上常回退**：`OllamaClient` 未用 Ollama 的 `format:"json"` 强制结构化输出，加上能大幅降低回退率。
-- **[低] 陈述句被路由成 memory.add 任务**（planner 侧）；README 结构重复且未提"现在能闲聊"。
+- **[中] Memory Lifecycle 仍是基础版**：已支持 active/archived、访问统计、精确去重;语义合并、重要性排序、过期策略、归档策略仍未做。
+- **[中] Event Log 后端仍是本地 JSONL**：已具备 EventWriter 抽象、JSONL、大小轮转/备份保留、基础文件锁、轮转备份读取、timeline、eval 统计;数据库后端、集中式可观测平台、分布式级别并发治理未做。
+- **[中] SafetyPolicy 仍是规则版**：已结构化类别、风险、规则 id 和置信度;真实生产还应接 LLM/moderation 多层判断。
+- **[低] README/文档可继续拆分**：README 已能跑通实操,但内容越来越长,后续可拆成 tutorial / architecture / operations。
+
+已在后续修掉：
+
+- `build_answer` 与 `ResponsePolicy` 的工具结果汇总重复已抽到 `tool_summary.summarize_tool_trace()`。
+- 无工具意图的闲聊/纯记忆确认轮次已通过 `planner_skipped` 跳过 Planner,避免 HermesPlanner + LlmResponder 双 LLM 调用;无 responder 的离线 demo 仍保留 planner final answer。
 
 ---
 
@@ -99,8 +105,10 @@ Agent.run(goal)
 
 ```bash
 cd /Users/jurongchao/Desktop/ai学习测试库/agentic
-python3 -m pytest -q          # 38 passed
+.venv/bin/python -m pytest -q  # 113 passed
+.venv/bin/python -m mypy agentic_core
 python3 -m compileall agentic_core examples tests
+python3 -m agentic_core.eval_harness
 ```
 
 LLM 相关全部用 stub client 覆盖，不依赖真实 Ollama；真实 Ollama 仅用于端到端手动验证。

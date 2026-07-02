@@ -38,7 +38,11 @@ class OllamaClient:
         # 你的本机之前 curl localhost 时有代理干扰,这里显式让 urllib 不走代理。
         self._opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
-    def chat(self, messages: list[dict[str, str]]) -> dict[str, Any]:
+    def chat(
+        self,
+        messages: list[dict[str, str]],
+        format_json: bool = False,
+    ) -> dict[str, Any]:
         """调用 Ollama /api/chat。
 
         messages 示例:
@@ -46,12 +50,18 @@ class OllamaClient:
                 {"role": "system", "content": "Return JSON only"},
                 {"role": "user", "content": "帮我计算 128 * 7"}
             ]
+
+        format_json=True 时会给 Ollama 传 {"format": "json"}。
+        这不是安全边界,仍然要由 Planner/MemoryPolicy 解析和校验,
+        但能显著减少本地模型输出 markdown/解释文字导致的 fallback。
         """
         payload = {
             "model": self.model,
             "messages": messages,
             "stream": False,
         }
+        if format_json:
+            payload["format"] = "json"
 
         # urllib 需要我们手动构造 Request。
         # data 必须是 bytes,所以 json.dumps 后要 encode("utf-8")。

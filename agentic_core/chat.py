@@ -10,7 +10,7 @@ except ImportError:  # pragma: no cover
     readline = None  # type: ignore[assignment]
 
 from .agent import Agent
-from .memory import MemoryStore
+from .memory import build_memory_store_from_env
 from .memory_policy import LlmMemoryPolicy, RuleBasedMemoryPolicy
 from .ollama_client import OllamaClient
 from .planner import HermesPlanner, RuleBasedPlanner
@@ -35,7 +35,7 @@ def build_agent() -> Agent:
     model = os.getenv("AGENTIC_MODEL", "openhermes:latest")
     planner_mode = os.getenv("AGENTIC_PLANNER", "hermes").lower()
 
-    memory = MemoryStore()
+    memory = build_memory_store_from_env()
     memory_policy = (
         LlmMemoryPolicy(OllamaClient(model=model))
         if os.getenv("AGENTIC_MEMORY_POLICY", "llm").lower() == "llm"
@@ -99,7 +99,11 @@ def main() -> int:
     print("Agentic Core Chat")
     print("输入 exit / quit / 退出 结束。")
     print(f"输入提示符: {prompt!r}")
-    print("当前记忆只保存在本次 chat 进程内,退出后会消失。")
+    memory_path = os.getenv("AGENTIC_MEMORY_PATH", "data/memory.json")
+    if os.getenv("AGENTIC_MEMORY_STORE", "memory").lower() == "json" or os.getenv("AGENTIC_MEMORY_PATH"):
+        print(f"当前记忆会持久化到 {memory_path}。")
+    else:
+        print("当前记忆只保存在本次 chat 进程内,退出后会消失。")
     print(f"Trace: {trace_mode} (设 AGENTIC_TRACE=off|brief|json 切换)")
     print()
 

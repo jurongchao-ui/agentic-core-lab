@@ -1,24 +1,25 @@
 from __future__ import annotations
 
-from typing import Any, Protocol, TypedDict, runtime_checkable
+from dataclasses import dataclass
+from typing import Any, Protocol, runtime_checkable
 
-from .memory import MemoryStore
 from .response_policy import ResponseContext, ResponseDecision
-from .schemas import Action, MemoryDecision, SafetyDecision
+from .schemas import Action, MemoryDecision, MemorySnapshot, SafetyDecision, TraceStep
 
 
-class PlannerContext(TypedDict):
+@dataclass
+class PlannerContext:
     """Planner 每一步能看到的上下文包。
 
-    以前是裸 dict[str, Any],现在用 TypedDict 明确有哪些键,
-    这样 planner 内部 context["goal"] 之类访问能被类型检查。
+    现在它是 dataclass,不是裸 dict。Planner 只能读取记忆快照,
+    不能直接拿到 MemoryStore 去修改记忆。
     """
 
     run_id: str
     goal: str
     step: int
-    trace: list[dict[str, Any]]
-    memory: MemoryStore
+    trace: list[TraceStep]
+    memory_snapshot: MemorySnapshot
     available_tools: list[dict[str, Any]]
 
 
@@ -54,7 +55,11 @@ class ResponsePolicy(Protocol):
 class LlmClient(Protocol):
     """LLM 客户端。实现: OllamaClient(测试用 FakeClient)。"""
 
-    def chat(self, messages: list[dict[str, str]]) -> dict[str, Any]: ...
+    def chat(
+        self,
+        messages: list[dict[str, str]],
+        format_json: bool = False,
+    ) -> dict[str, Any]: ...
 
 
 @runtime_checkable

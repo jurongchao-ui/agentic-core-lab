@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import re
 from dataclasses import asdict, dataclass
 from typing import Any
 
-from .schemas import MemoryDecision, SafetyDecision
+from .schemas import MemoryDecision, MemoryRecord, MemorySnapshot, SafetyDecision, TraceStep
+from .tool_summary import summarize_tool_trace
 
 
 @dataclass
@@ -17,11 +17,11 @@ class ResponseContext:
 
     goal: str
     memory_decision: MemoryDecision
-    saved_memories: list[dict[str, Any]]
-    trace: list[dict[str, Any]]
+    saved_memories: list[MemoryRecord]
+    trace: list[TraceStep]
     planner_answer: str | None
     incomplete_reason: str | None
-    memory_snapshot: dict[str, Any]
+    memory_snapshot: MemorySnapshot
     responder: Any | None = None
     safety_decision: SafetyDecision | None = None
 
@@ -82,14 +82,14 @@ class RuleBasedResponsePolicy:
 
         # 3. memory confirmation: 只确认真实写入的长期记忆。
         if context.saved_memories:
-            memory_texts = [memory.get("text", "") for memory in context.saved_memories if memory.get("text")]
+            memory_texts = [memory.text for memory in context.saved_memories if memory.text]
             if memory_texts:
                 parts.append("已记住：" + "；".join(memory_texts) + "。")
                 tiers.append("memory_confirmation")
                 reasons.append(f"本轮实际写入 {len(memory_texts)} 条长期记忆。")
 
         # 4. tool result summary + failure: 只根据 trace/observation 说话。
-        tool_summary = self._summarize_tools(context)
+        tool_summary = summarize_tool_trace(context.goal, context.trace)
         if tool_summary.success_text:
             parts.append(tool_summary.success_text)
             tiers.append("tool_result_summary")
@@ -120,7 +120,7 @@ class RuleBasedResponsePolicy:
         # 7. normal responder: 普通聊天/解释才交给 responder。
         if context.responder is not None:
             return ResponseDecision(
-                text=context.responder.reply(context.goal, context.memory_snapshot),
+                text=context.responder.reply(context.goal, context.memory_snapshot.to_dict()),
                 tiers=["normal_responder"],
                 reason="没有工具结果和记忆动作,使用 responder 生成普通回复。",
             )
@@ -138,78 +138,3 @@ class RuleBasedResponsePolicy:
         不靠 reason 文案匹配——文案一改就静默失效。
         """
         return not decision.save and decision.scores.get("sensitivity_risk", 0) >= 3
-
-    def _summarize_tools(self, context: ResponseContext) -> "_ToolSummary":
-        successes: list[str] = []
-        failures: list[str] = []
-
-        failed_calculator = self._first_failed_tool(context.trace, "calculator")
-        successful_calculator = self._first_successful_tool(context.trace, "calculator")
-        goal_needs_note = bool(re.search(r"记录|笔记|note", context.goal, re.I))
-        goal_has_arithmetic = bool(re.search(r"(\d+(?:\s*[+\-*/%]\s*\d+)+)", context.goal))
-        note_depends_on_failed_calculation = bool(
-            failed_calculator and goal_has_arithmetic and goal_needs_note and not successful_calculator
-        )
-
-        for item in context.trace:
-            action = item.get("action", {})
-            observation = item.get("observation", {})
-            tool_name = action.get("toolName")
-            if not observation:
-                continue
-            if not observation.get("ok"):
-                # 计算失败且后续笔记依赖该计算时,用一条更准确的失败说明。
-                if tool_name == "calculator" and note_depends_on_failed_calculation:
-                    failures.append(f"计算失败：{observation.get('error')}，因此没有记录学习笔记。")
-                else:
-                    failures.append(f"{tool_name} 执行失败：{observation.get('error')}。")
-                continue
-
-            output = observation.get("output")
-            if tool_name == "calculator":
-                successes.append(f"计算结果是 {output['result']}。")
-            elif tool_name == "note.add" and not note_depends_on_failed_calculation:
-                successes.append(f"已记录学习笔记：{output['text']}。")
-            elif tool_name == "todo.add":
-                successes.append(f"已添加待办：{output['text']}。")
-            elif tool_name == "todo.list":
-                if output:
-                    todos = "；".join(f"{todo['id']}:{todo['text']}" for todo in output)
-                    successes.append(f"当前待办：{todos}。")
-                else:
-                    successes.append("当前没有待办。")
-            elif tool_name == "memory.add":
-                if output.get("saved"):
-                    # memory.add 成功保存时,由 saved_memories 的统一确认负责,这里不重复说。
-                    continue
-                successes.append(f"长期记忆未保存：{output.get('reason')}。")
-
-        return _ToolSummary(success_text="".join(successes), failure_text="".join(failures))
-
-    def _first_successful_tool(
-        self, trace: list[dict[str, Any]], tool_name: str
-    ) -> dict[str, Any] | None:
-        for item in trace:
-            if (
-                item.get("action", {}).get("toolName") == tool_name
-                and item.get("observation", {}).get("ok")
-            ):
-                return item
-        return None
-
-    def _first_failed_tool(
-        self, trace: list[dict[str, Any]], tool_name: str
-    ) -> dict[str, Any] | None:
-        for item in trace:
-            if (
-                item.get("action", {}).get("toolName") == tool_name
-                and not item.get("observation", {}).get("ok")
-            ):
-                return item
-        return None
-
-
-@dataclass
-class _ToolSummary:
-    success_text: str
-    failure_text: str

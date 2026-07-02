@@ -17,7 +17,11 @@ from agentic_core.response_policy import RuleBasedResponsePolicy
 
 
 class FakeClient:
-    def chat(self, messages: list[dict[str, str]]) -> dict[str, Any]:
+    def chat(
+        self,
+        messages: list[dict[str, str]],
+        format_json: bool = False,
+    ) -> dict[str, Any]:
         return {"message": {"content": "{}"}}
 
 

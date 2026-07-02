@@ -23,7 +23,7 @@ TECH_STACK_VALUE_PATTERN = re.compile(
 )
 # 敏感信息真相源: rule 版和 llm 版共用同一个模式,保证“不该长期保存的信息”只有一处定义。
 SENSITIVE_PATTERN = re.compile(
-    r"密码|密钥|token|银行卡|身份证|账号|验证码|api[_ -]?key",
+    r"密码|密钥|token|银行卡|身份证|账号|验证码|api[_ -]?key|password|secret|private[_ -]?key|access[_ -]?key|cookie|credential",
     re.I,
 )
 
@@ -315,7 +315,7 @@ class LlmMemoryPolicy:
         # 先把 content 置空,这样即使解析失败,回退时也能把模型原文带进 metadata。
         content: str | None = None
         try:
-            raw = self.client.chat(self._messages(text))
+            raw = self.client.chat(self._messages(text), format_json=True)
             content = raw.get("message", {}).get("content", "")
             decision = self._parse_decision(content, text)
             decision.metadata = {"source": "llm", "rawModelOutput": content}
