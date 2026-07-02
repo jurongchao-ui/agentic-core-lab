@@ -6,3 +6,6 @@ __pycache__/
 node_modules/
 .venv/
 venv/
+data/*.jsonl
+data/memory.json
+data/memory.json.tmp

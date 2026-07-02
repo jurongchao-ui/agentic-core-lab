@@ -12,8 +12,14 @@ class FakeClient:
     def __init__(self, content: str | None = None, error: Exception | None = None) -> None:
         self._content = content
         self._error = error
+        self.format_json_calls: list[bool] = []
 
-    def chat(self, messages: list[dict[str, str]]) -> dict[str, Any]:
+    def chat(
+        self,
+        messages: list[dict[str, str]],
+        format_json: bool = False,
+    ) -> dict[str, Any]:
+        self.format_json_calls.append(format_json)
         if self._error is not None:
             raise self._error
         return {"message": {"content": self._content}}
@@ -142,6 +148,18 @@ def test_captures_raw_output_on_success() -> None:
     decision = policy.evaluate("以后每次学习控制在30分钟")
     assert decision.metadata["source"] == "llm"
     assert decision.metadata["rawModelOutput"] == content
+
+
+def test_llm_memory_policy_requests_json_format() -> None:
+    content = json.dumps(
+        {"save": True, "type": "preference", "text": "x", "confidence": 90}, ensure_ascii=False
+    )
+    client = FakeClient(content=content)
+    policy = LlmMemoryPolicy(client)
+
+    policy.evaluate("以后每次学习控制在30分钟")
+
+    assert client.format_json_calls == [True]
 
 
 def test_captures_fallback_metadata_on_error() -> None:

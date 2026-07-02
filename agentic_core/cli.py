@@ -5,7 +5,7 @@ import os
 import sys
 
 from .agent import Agent
-from .memory import MemoryStore
+from .memory import build_memory_store_from_env
 from .memory_policy import LlmMemoryPolicy, RuleBasedMemoryPolicy
 from .ollama_client import OllamaClient
 from .planner import HermesPlanner, RuleBasedPlanner
@@ -44,7 +44,7 @@ def main() -> int:
     # 这类写法也叫 dependency injection: 把组件创建好,再传给 Agent。
     # AGENTIC_MEMORY_POLICY=llm 用 LLM 抽取(默认,不可用时自动回退规则版),
     # =rule 则完全离线只用规则版。
-    memory = MemoryStore()
+    memory = build_memory_store_from_env()
     memory_policy = (
         LlmMemoryPolicy(OllamaClient(model=model))
         if os.getenv("AGENTIC_MEMORY_POLICY", "llm").lower() == "llm"

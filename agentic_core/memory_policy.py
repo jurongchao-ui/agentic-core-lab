@@ -4,8 +4,8 @@ import json
 import re
 from typing import Any
 
+from .contracts import LlmClient
 from .json_utils import extract_json_object
-from .ollama_client import OllamaClient
 from .schemas import MemoryDecision
 
 
@@ -23,29 +23,12 @@ TECH_STACK_VALUE_PATTERN = re.compile(
 )
 # 敏感信息真相源: rule 版和 llm 版共用同一个模式,保证“不该长期保存的信息”只有一处定义。
 SENSITIVE_PATTERN = re.compile(
-    r"密码|密钥|token|银行卡|身份证|账号|验证码|api[_ -]?key",
+    r"密码|密钥|token|银行卡|身份证|账号|验证码|api[_ -]?key|password|secret|private[_ -]?key|access[_ -]?key|cookie|credential",
     re.I,
 )
 
 
-class MemoryPolicy:
-    """记忆策略的契约(基类)。
-
-    只声明一个能力:
-        evaluate(text) -> MemoryDecision
-
-    有两个实现:
-        RuleBasedMemoryPolicy: 纯正则,确定性,离线,作为兜底。
-        LlmMemoryPolicy:       LLM 做语义抽取,程序把关,Ollama 不可用时回退到规则版。
-
-    这和 planner.py 里 RuleBasedPlanner / HermesPlanner 的关系一模一样。
-    """
-
-    def evaluate(self, text: str) -> MemoryDecision:
-        raise NotImplementedError
-
-
-class RuleBasedMemoryPolicy(MemoryPolicy):
+class RuleBasedMemoryPolicy:
     """决定“要不要把这句话写入长期记忆”的规则层。
 
     一个重要原则:
@@ -297,7 +280,7 @@ def coerce_confidence(value: Any, default: int) -> int:
     return max(0, min(100, int(number)))
 
 
-class LlmMemoryPolicy(MemoryPolicy):
+class LlmMemoryPolicy:
     """用 LLM 做语义记忆抽取的策略,程序保留最终 gate。
 
     结构和 planner.py 的 HermesPlanner 一模一样:
@@ -319,7 +302,7 @@ class LlmMemoryPolicy(MemoryPolicy):
     CONFIDENCE_THRESHOLD = 60
 
     def __init__(
-        self, client: OllamaClient, fallback: RuleBasedMemoryPolicy | None = None
+        self, client: LlmClient, fallback: RuleBasedMemoryPolicy | None = None
     ) -> None:
         self.client = client
         self.fallback = fallback or RuleBasedMemoryPolicy()
@@ -332,7 +315,7 @@ class LlmMemoryPolicy(MemoryPolicy):
         # 先把 content 置空,这样即使解析失败,回退时也能把模型原文带进 metadata。
         content: str | None = None
         try:
-            raw = self.client.chat(self._messages(text))
+            raw = self.client.chat(self._messages(text), format_json=True)
             content = raw.get("message", {}).get("content", "")
             decision = self._parse_decision(content, text)
             decision.metadata = {"source": "llm", "rawModelOutput": content}

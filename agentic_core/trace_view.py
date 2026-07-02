@@ -85,6 +85,7 @@ def format_run_json(result: dict[str, Any]) -> str:
     """完整 JSON,包含 memoryDecision / trace / snapshot 里的全部细节。"""
     return json.dumps(
         {
+            "safetyDecision": result.get("safetyDecision"),
             "memoryDecision": result.get("memoryDecision"),
             "responseDecision": result.get("responseDecision"),
             "trace": result.get("trace"),

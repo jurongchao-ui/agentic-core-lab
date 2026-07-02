@@ -4,9 +4,10 @@ import json
 import re
 from typing import Any
 
+from .contracts import LlmClient, PlannerContext
 from .json_utils import extract_json_object
-from .ollama_client import OllamaClient
-from .schemas import Action
+from .schemas import Action, MemorySnapshot, TraceStep
+from .tool_summary import summarize_tool_trace
 
 
 class RuleBasedPlanner:
@@ -17,17 +18,18 @@ class RuleBasedPlanner:
     2. 作为 HermesPlanner 的兜底方案,当模型输出不合法时接管任务。
     """
 
-    def next(self, context: dict[str, Any]) -> Action:
+    def next(self, context: PlannerContext) -> Action:
         # context 是 Agent 传进来的上下文包。
         # 这里取出最常用的三个字段。
-        goal = context["goal"]
-        trace = context["trace"]
-        memory = context["memory"]
+        goal = context.goal
+        trace = context.trace
+        memory = context.memory_snapshot
 
         # 从用户输入中提取几个意图信号。
         # extract_arithmetic("帮我计算 128 * 7") -> "128 * 7"
         expression = extract_arithmetic(goal)
         todo_text = extract_todo(goal)
+        study_topic = extract_study_topic(goal)
         should_record_note = bool(re.search(r"记录|笔记|note", goal, re.I))
         should_list_todos = bool(re.search(r"列出待办|查看待办|list todo", goal, re.I))
 
@@ -58,7 +60,7 @@ class RuleBasedPlanner:
             # 计算失败时,不要继续把“失败的计算任务”写成成功笔记。
             # 依赖关系应该由 observation 决定: 没有成功计算结果,就不能记录“计算学习笔记”。
             return Action.final(
-                build_answer(goal, trace, memory.snapshot()),
+                build_answer(goal, trace, memory),
                 "计算失败,依赖计算结果的笔记不能继续写入。",
                 source="rule",
             )
@@ -66,9 +68,10 @@ class RuleBasedPlanner:
         if should_record_note and not has_tool(trace, "note.add"):
             # 如果用户要求记录笔记,优先把前一步计算结果整理成笔记。
             calc = last_successful_tool(trace, "calculator")
+            calc_output = calc.observation.output if calc else None
             text = (
-                f"计算 {calc['observation']['output']['expression']} = {calc['observation']['output']['result']}"
-                if calc
+                f"计算 {calc_output['expression']} = {calc_output['result']}"
+                if calc_output
                 else f"学习笔记: {goal}"
             )
             return Action.tool(
@@ -87,9 +90,22 @@ class RuleBasedPlanner:
                 source="rule",
             )
 
+        if study_topic and not has_tool(trace, "study.plan"):
+            # 学习计划要显式读取长期记忆里的时间偏好。
+            # 例如“以后学习任务每次 30 分钟以内”会变成 max_minutes=30。
+            return Action.tool(
+                "study.plan",
+                {
+                    "topic": study_topic,
+                    "max_minutes": extract_study_max_minutes(goal, memory),
+                },
+                "用户要求安排学习计划,需要结合长期记忆里的学习时长偏好。",
+                source="rule",
+            )
+
         # 没有更多工具要调用时,生成最终回答。
         return Action.final(
-            build_answer(goal, trace, memory.snapshot()),
+            build_answer(goal, trace, memory),
             "已完成所需工具调用,可以汇总结果。",
             source="rule",
         )
@@ -113,14 +129,14 @@ class HermesPlanner:
         Hermes 输出不合格 -> 抛异常 -> RuleBasedPlanner 接管。
     """
 
-    def __init__(self, client: OllamaClient, fallback: RuleBasedPlanner | None = None) -> None:
+    def __init__(self, client: LlmClient, fallback: RuleBasedPlanner | None = None) -> None:
         # client 负责真正请求 Ollama。
         self.client = client
 
         # fallback 是兜底 planner。如果不传,默认创建一个 RuleBasedPlanner。
         self.fallback = fallback or RuleBasedPlanner()
 
-    def next(self, context: dict[str, Any]) -> Action:
+    def next(self, context: PlannerContext) -> Action:
         """让 Hermes 规划下一步 action。
 
         成功路径:
@@ -133,7 +149,7 @@ class HermesPlanner:
         content: str | None = None
         try:
             # 1. 把 context 转成 messages,发给 Ollama。
-            raw = self.client.chat(self._messages(context))
+            raw = self.client.chat(self._messages(context), format_json=True)
 
             # 2. Ollama /api/chat 返回的文本在 message.content 里。
             content = raw.get("message", {}).get("content", "")
@@ -156,7 +172,7 @@ class HermesPlanner:
             }
             return action
 
-    def _messages(self, context: dict[str, Any]) -> list[dict[str, str]]:
+    def _messages(self, context: PlannerContext) -> list[dict[str, str]]:
         """构造发给 Hermes 的 prompt。
 
         Ollama chat API 的 messages 结构类似:
@@ -168,17 +184,17 @@ class HermesPlanner:
         # payload 是模型能看到的“世界状态”。
         # 注意我们没有把 Python 对象直接发给模型,而是转成 JSON 字符串。
         payload = {
-            "goal": context["goal"],
-            "step": context["step"],
-            "trace": context["trace"],
-            "memory": context["memory"].snapshot(),
-            "availableTools": context["available_tools"],
+            "goal": context.goal,
+            "step": context.step,
+            "trace": [step.to_dict() for step in context.trace],
+            "memory": context.memory_snapshot.to_dict(),
+            "availableTools": context.available_tools,
             "toolInputSchemas": {
                 tool["name"]: {
                     field: describe_input_field(spec)
                     for field, spec in tool.get("inputSchema", {}).items()
                 }
-                for tool in context["available_tools"]
+                for tool in context.available_tools
             },
         }
         return [
@@ -199,7 +215,7 @@ class HermesPlanner:
             {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
         ]
 
-    def _parse_action(self, content: str, context: dict[str, Any]) -> Action:
+    def _parse_action(self, content: str, context: PlannerContext) -> Action:
         """把模型输出解析成 Action,并做严格校验。
 
         初学者可以把这里理解为“海关”:
@@ -213,7 +229,7 @@ class HermesPlanner:
         if action_type == "final":
             # 如果之前有工具失败,不允许模型直接 final。
             # 正确做法是继续规划或让 fallback 接管。
-            failed = [item for item in context["trace"] if not item.get("observation", {}).get("ok")]
+            failed = [item for item in context.trace if not item.observation.ok]
             if failed:
                 raise ValueError("model tried to finalize after a failed observation")
 
@@ -230,7 +246,7 @@ class HermesPlanner:
                 raise ValueError("tool action requires toolName")
 
             # 模型只能从 available_tools 里选工具。
-            allowed_tools = {tool["name"] for tool in context["available_tools"]}
+            allowed_tools = {tool["name"] for tool in context.available_tools}
             if tool_name not in allowed_tools:
                 raise ValueError(f"unknown model-selected tool: {tool_name}")
 
@@ -240,7 +256,7 @@ class HermesPlanner:
 
             # 检查工具参数是否齐全。
             # 例如 calculator 必须有 {"expression": "..."}。
-            validate_tool_input(tool_name, input_data, context["available_tools"])
+            validate_tool_input(tool_name, input_data, context.available_tools)
             return Action.tool(tool_name, input_data, reason)
         raise ValueError(f"unknown action type: {action_type}")
 
@@ -277,7 +293,7 @@ def validate_tool_input(
             raise ValueError(f"{tool_name} requires input.{field}")
 
 
-def validate_final_action(context: dict[str, Any], answer: str) -> None:
+def validate_final_action(context: PlannerContext, answer: str) -> None:
     """检查模型是否过早结束。
 
     举例:
@@ -289,8 +305,8 @@ def validate_final_action(context: dict[str, Any], answer: str) -> None:
         - 要求记录笔记时,note.add 是否成功执行过
         - 多步骤任务的最终回答是否足够完整
     """
-    goal = context["goal"]
-    trace = context["trace"]
+    goal = context.goal
+    trace = context.trace
     multi_step_goal = False
     if extract_arithmetic(goal) and not has_successful_tool(trace, "calculator"):
         raise ValueError("final action before calculator completed")
@@ -308,6 +324,12 @@ def validate_final_action(context: dict[str, Any], answer: str) -> None:
         multi_step_goal = True
         if not has_successful_tool(trace, "todo.list"):
             raise ValueError("final action before todo.list completed")
+    if extract_study_topic(goal):
+        multi_step_goal = True
+        if not has_successful_tool(trace, "study.plan"):
+            raise ValueError("final action before study.plan completed")
+        if not re.search(r"学习|计划|分钟", answer):
+            raise ValueError("final answer does not mention the study plan")
     if multi_step_goal and len(answer.strip()) < 12:
         raise ValueError("final answer is too terse for a multi-step goal")
 
@@ -324,71 +346,72 @@ def extract_todo(goal: str) -> str | None:
     return match.group(1).strip() if match else None
 
 
-def has_tool(trace: list[dict[str, Any]], tool_name: str) -> bool:
+def extract_study_topic(goal: str) -> str | None:
+    """从用户目标里提取学习计划主题。"""
+
+    if not re.search(r"学习计划|学习安排|学习规划|study plan", goal, re.I):
+        return None
+    text = re.sub(r"帮我|请|安排|制定|生成|一个|的?学习计划|学习安排|study plan", " ", goal, flags=re.I)
+    text = re.sub(r"\s+", " ", text).strip(" ，,。")
+    return text or "agentic"
+
+
+def extract_study_max_minutes(goal: str, snapshot: MemorySnapshot) -> int:
+    """从当前目标或长期记忆里提取学习计划时长限制。"""
+
+    goal_minutes = _extract_minutes(goal)
+    if goal_minutes:
+        return goal_minutes
+    for memory in reversed(snapshot.long_term_memories):
+        minutes = _extract_minutes(memory.text)
+        if minutes:
+            return minutes
+    return 45
+
+
+def _extract_minutes(text: str) -> int | None:
+    match = re.search(r"(\d{1,3})\s*分钟", text)
+    if not match:
+        return None
+    minutes = int(match.group(1))
+    return minutes if minutes > 0 else None
+
+
+def has_tool(trace: list[TraceStep], tool_name: str) -> bool:
     """判断某个工具是否已经被调用过,不关心成功还是失败。"""
-    return any(item.get("action", {}).get("toolName") == tool_name for item in trace)
+    return any(item.action.tool_name == tool_name for item in trace)
 
 
-def has_successful_tool(trace: list[dict[str, Any]], tool_name: str) -> bool:
+def has_successful_tool(trace: list[TraceStep], tool_name: str) -> bool:
     """判断某个工具是否已经成功执行过。"""
-    return any(
-        item.get("action", {}).get("toolName") == tool_name and item.get("observation", {}).get("ok")
-        for item in trace
-    )
+    return any(item.action.tool_name == tool_name and item.observation.ok for item in trace)
 
 
-def has_failed_tool(trace: list[dict[str, Any]], tool_name: str) -> bool:
+def has_failed_tool(trace: list[TraceStep], tool_name: str) -> bool:
     """判断某个工具是否失败过。"""
-    return any(
-        item.get("action", {}).get("toolName") == tool_name
-        and not item.get("observation", {}).get("ok")
-        for item in trace
-    )
+    return any(item.action.tool_name == tool_name and not item.observation.ok for item in trace)
 
 
-def last_successful_tool(trace: list[dict[str, Any]], tool_name: str) -> dict[str, Any] | None:
+def last_successful_tool(trace: list[TraceStep], tool_name: str) -> TraceStep | None:
     """从后往前找最近一次成功执行的工具结果。"""
     for item in reversed(trace):
-        if item.get("action", {}).get("toolName") == tool_name and item.get("observation", {}).get("ok"):
+        if item.action.tool_name == tool_name and item.observation.ok:
             return item
     return None
 
 
-def build_answer(goal: str, trace: list[dict[str, Any]], snapshot: dict[str, Any]) -> str:
+def build_answer(goal: str, trace: list[TraceStep], snapshot: MemorySnapshot) -> str:
     """根据 trace 和 memory snapshot 生成最终回答。
 
     RuleBasedPlanner 使用这个函数输出稳定、可解释的最终结果。
     Hermes 输出太短或不完整时,也会回退到这里。
     """
     lines = [f"目标: {goal}", "执行结果:"]
-    for item in trace:
-        action = item["action"]
-        observation = item["observation"]
-        tool_name = action.get("toolName")
-        if not observation.get("ok"):
-            lines.append(f"- {tool_name} 失败: {observation.get('error')}")
-            continue
-        output = observation.get("output")
-        if tool_name == "calculator":
-            lines.append(f"- 计算完成: {output['expression']} = {output['result']}")
-        elif tool_name == "note.add":
-            lines.append(f"- 笔记已保存: {output['text']}")
-        elif tool_name == "todo.add":
-            lines.append(f"- 待办已添加: {output['text']}")
-        elif tool_name == "todo.list":
-            lines.append(
-                "- 当前待办: "
-                + ("; ".join(f"{todo['id']}:{todo['text']}" for todo in output) if output else "当前没有待办")
-            )
-        elif tool_name == "memory.add":
-            if output.get("saved"):
-                lines.append(f"- 长期记忆已保存: {output['memory']['text']}")
-            else:
-                lines.append(f"- 长期记忆未保存(未通过记忆策略): {output.get('reason')}")
+    lines.extend(summarize_tool_trace(goal, trace).lines)
     lines.append(
         "记忆状态: "
-        f"{len(snapshot['notes'])} 条笔记, "
-        f"{len(snapshot['todos'])} 条待办, "
-        f"{len(snapshot['longTermMemories'])} 条长期记忆。"
+        f"{len(snapshot.notes)} 条笔记, "
+        f"{len(snapshot.todos)} 条待办, "
+        f"{len(snapshot.long_term_memories)} 条长期记忆。"
     )
     return "\n".join(lines)
