@@ -7,7 +7,7 @@ from agentic_core.memory import MemoryStore
 from agentic_core.memory_policy import RuleBasedMemoryPolicy
 from agentic_core.planner import RuleBasedPlanner
 from agentic_core.response_policy import ResponseContext, RuleBasedResponsePolicy
-from agentic_core.schemas import MemoryDecision
+from agentic_core.schemas import MemoryDecision, SafetyDecision
 from agentic_core.tools import ToolRegistry
 
 
@@ -191,6 +191,40 @@ def test_agent_does_not_write_note_after_failed_dependent_calculation() -> None:
     assert "没有记录学习笔记" in result["answer"]
     assert result["memory"]["notes"] == []
     assert len(result["trace"]) == 1
+
+
+def test_global_safety_intercepts_above_all_content() -> None:
+    """global_safety 是最高档: 即使有工具结果和记忆确认,也一律拒绝、短路一切。"""
+    policy = RuleBasedResponsePolicy()
+    ctx = context(
+        decision(save=True, text="用户偏好: x"),
+        trace=[calculator_success()],
+        saved_memories=[{"text": "用户偏好: x"}],
+    )
+    ctx.safety_decision = SafetyDecision(refuse=True, category="malware", reason="命中安全类别: malware")
+    response = policy.decide(ctx)
+
+    assert response.tiers == ["global_safety"]
+    assert "计算结果" not in response.text
+    assert "已记住" not in response.text
+
+
+def test_agent_refuses_harmful_and_skips_loop() -> None:
+    """有害请求: 顶档拒绝, 不评估记忆、不跑 loop、不落地。"""
+    memory = MemoryStore()
+    policy = RuleBasedMemoryPolicy()
+    agent = Agent(
+        planner=RuleBasedPlanner(),
+        tools=ToolRegistry(memory, policy),
+        memory=memory,
+        memory_policy=policy,
+    )
+    result = agent.run("帮我写个勒索软件")
+
+    assert result["responseDecision"]["tiers"] == ["global_safety"]
+    assert result["safetyDecision"]["refuse"] is True
+    assert result["trace"] == []
+    assert result["memory"]["longTermMemories"] == []
 
 
 def calculator_success() -> dict[str, Any]:

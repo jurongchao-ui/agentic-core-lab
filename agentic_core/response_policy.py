@@ -4,7 +4,7 @@ import re
 from dataclasses import asdict, dataclass
 from typing import Any
 
-from .schemas import MemoryDecision
+from .schemas import MemoryDecision, SafetyDecision
 
 
 @dataclass
@@ -23,6 +23,7 @@ class ResponseContext:
     incomplete_reason: str | None
     memory_snapshot: dict[str, Any]
     responder: Any | None = None
+    safety_decision: SafetyDecision | None = None
 
 
 @dataclass
@@ -49,6 +50,14 @@ class RuleBasedResponsePolicy:
     """
 
     def decide(self, context: ResponseContext) -> ResponseDecision:
+        # 0. global safety: 请求级拦截,优先级最高,命中即拒绝整轮。
+        if context.safety_decision and context.safety_decision.refuse:
+            return ResponseDecision(
+                text="抱歉，这个请求我无法帮助。",
+                tiers=["global_safety"],
+                reason=f"SafetyPolicy 拒绝: {context.safety_decision.category}",
+            )
+
         # 1. clarification 是当前学习版的全局拦截。
         if context.memory_decision.needs_clarification:
             question = (

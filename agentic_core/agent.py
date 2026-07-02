@@ -3,10 +3,18 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from .contracts import MemoryPolicy, Planner, PlannerContext, Responder, ResponsePolicy
+from .contracts import (
+    MemoryPolicy,
+    Planner,
+    PlannerContext,
+    Responder,
+    ResponsePolicy,
+    SafetyPolicy,
+)
 from .memory import MemoryStore
 from .response_policy import ResponseContext, ResponseDecision, RuleBasedResponsePolicy
-from .schemas import Observation
+from .safety_policy import RuleBasedSafetyPolicy
+from .schemas import MemoryDecision, Observation, SafetyDecision
 from .tools import ToolRegistry
 
 
@@ -30,6 +38,7 @@ class Agent:
         max_steps: int = 8,
         responder: Responder | None = None,
         response_policy: ResponsePolicy | None = None,
+        safety_policy: SafetyPolicy | None = None,
     ) -> None:
         # planner: 决定下一步做什么。可以是 HermesPlanner,也可以是 RuleBasedPlanner。
         self.planner = planner
@@ -41,6 +50,9 @@ class Agent:
         # response_policy: 最终回复仲裁层。它决定“该追问、确认记忆、总结工具,
         # 还是交给 responder”,避免 responder 覆盖已经发生的系统事实。
         self.response_policy = response_policy or RuleBasedResponsePolicy()
+
+        # safety_policy: 请求级全局安全拦截。命中即拒绝整轮,跳过记忆评估和 loop。
+        self.safety_policy = safety_policy or RuleBasedSafetyPolicy()
 
         # tools: 工具注册表。Agent 不知道每个工具内部怎么实现,只按名字调用。
         self.tools = tools
@@ -75,6 +87,39 @@ class Agent:
         # 后续 planner 会读取 trace,判断“已经做过什么,下一步该做什么”。
         trace: list[dict[str, Any]] = []
 
+        # 0. 全局安全拦截: 有害请求直接拒绝整轮,跳过记忆评估和 loop。
+        safety_decision = self.safety_policy.check(goal)
+        if safety_decision.refuse:
+            neutral = MemoryDecision(
+                save=False, memory_type="none", text="", reason="被安全策略拦截", scores={}
+            )
+            response_decision = self._decide_response(
+                goal=goal,
+                memory_decision=neutral,
+                saved_memories=[],
+                trace=trace,
+                planner_answer=None,
+                incomplete_reason=None,
+                safety_decision=safety_decision,
+            )
+            self.memory.record_event(
+                {
+                    "runId": run_id,
+                    "type": "safety_refusal",
+                    "safety": safety_decision.to_dict(),
+                    "answer": response_decision.text,
+                }
+            )
+            return {
+                "runId": run_id,
+                "answer": response_decision.text,
+                "memoryDecision": neutral.to_dict(),
+                "safetyDecision": safety_decision.to_dict(),
+                "responseDecision": response_decision.to_dict(),
+                "trace": trace,
+                "memory": self.memory.snapshot(),
+            }
+
         # 第一步先做记忆判断。
         # 注意: 这一步不是让模型自由决定,而是交给 MemoryPolicy 的规则层。
         memory_decision = self.memory_policy.evaluate(goal)
@@ -90,6 +135,7 @@ class Agent:
                 trace=trace,
                 planner_answer=None,
                 incomplete_reason=None,
+                safety_decision=safety_decision,
             )
             self.memory.record_event(
                 {
@@ -104,6 +150,7 @@ class Agent:
                 "runId": run_id,
                 "answer": response_decision.text,
                 "memoryDecision": memory_decision.to_dict(),
+                "safetyDecision": safety_decision.to_dict(),
                 "responseDecision": response_decision.to_dict(),
                 "trace": trace,
                 "memory": self.memory.snapshot(),
@@ -165,6 +212,7 @@ class Agent:
                     trace=trace,
                     planner_answer=planner_answer,
                     incomplete_reason=None,
+                    safety_decision=safety_decision,
                 )
                 self.memory.record_event(
                     {
@@ -178,6 +226,7 @@ class Agent:
                     "runId": run_id,
                     "answer": response_decision.text,
                     "memoryDecision": memory_decision.to_dict(),
+                    "safetyDecision": safety_decision.to_dict(),
                     "responseDecision": response_decision.to_dict(),
                     "trace": trace,
                     "memory": self.memory.snapshot(),
@@ -217,11 +266,13 @@ class Agent:
             trace=trace,
             planner_answer=None,
             incomplete_reason=incomplete_reason,
+            safety_decision=safety_decision,
         )
         return {
             "runId": run_id,
             "answer": response_decision.text,
             "memoryDecision": memory_decision.to_dict(),
+            "safetyDecision": safety_decision.to_dict(),
             "responseDecision": response_decision.to_dict(),
             "trace": trace,
             "memory": self.memory.snapshot(),
@@ -230,11 +281,12 @@ class Agent:
     def _decide_response(
         self,
         goal: str,
-        memory_decision: Any,
+        memory_decision: MemoryDecision,
         saved_memories: list[dict[str, Any]],
         trace: list[dict[str, Any]],
         planner_answer: str | None,
         incomplete_reason: str | None,
+        safety_decision: SafetyDecision | None = None,
     ) -> ResponseDecision:
         """创建 ResponseContext,交给 ResponsePolicy 生成最终回复。"""
         return self.response_policy.decide(
@@ -247,6 +299,7 @@ class Agent:
                 incomplete_reason=incomplete_reason,
                 memory_snapshot=self.memory.snapshot(),
                 responder=self.responder,
+                safety_decision=safety_decision,
             )
         )
 
