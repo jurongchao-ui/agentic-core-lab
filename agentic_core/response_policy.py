@@ -1,3 +1,23 @@
+"""response_policy — 最终回复仲裁层(结构化满足 contracts.ResponsePolicy)。
+
+功能:
+  - RuleBasedResponsePolicy.decide(ResponseContext) 决定"最终回什么类型",不让 responder
+    覆盖已经发生的系统事实。返回可审计的 ResponseDecision(text, tiers, reason)。
+  - 优先级分三类:
+      拦截档(命中即停): global_safety(拒整轮) > clarification(追问) > local_safety(拒存敏感)
+      内容档(可组合):   记忆确认 + 工具结果汇总 + 失败/未完成说明
+      兜底档:            planner 的 final answer > 普通闲聊交给 responder
+  - 工具汇总不自己写,复用 tool_summary.summarize_tool_trace(单一真相源)。
+
+调用关系图:
+  Agent(run 的收尾/拦截处)
+      └─▶ ResponsePolicy.decide(ResponseContext) ─▶ ResponseDecision(text, tiers, reason)
+            ├─▶ summarize_tool_trace(goal, trace)   (tool_summary) —— 工具结果文案
+            └─▶ responder.reply(...)                (仅 normal_responder 兜底档)
+  输入 ResponseContext 由 Agent 组装(memory_decision / saved_memories / trace /
+  safety_decision / planner_answer / incomplete_reason / responder)。
+"""
+
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass

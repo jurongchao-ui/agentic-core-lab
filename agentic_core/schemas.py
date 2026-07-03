@@ -1,7 +1,28 @@
+"""schemas — Typed State: 全项目共享的数据结构(单一真相源)。
+
+功能:
+  - 把在各模块间流转的数据从裸 dict 收敛成 dataclass + Literal 枚举, 让 mypy 能校验、
+    让字段有唯一定义。各结构都带 to_dict()(驼峰键), 供 JSON 输出/事件/前端。
+  - 决策类: Action(planner 输出) / Observation(工具结果) / MemoryDecision(记忆策略) /
+    SafetyDecision(安全策略) / ResponseDecision(见 response_policy)。
+  - 记录类: NoteRecord / TodoRecord / MemoryRecord(带 status/importance/expiresAt 生命周期) /
+    EventRecord(id/type/runId/payload/source/level/schemaVersion/redacted)。
+  - 运行态: TraceStep(一步 action+observation) / AgentRunState(运行中可变状态) /
+    AgentRunResult(一次 run 的完整强类型结果)。
+  - 枚举: ActionType / RunStatus / EventType / MemoryType / MemoryStatus。
+
+调用关系图:
+  几乎所有模块都 import schemas 的类型(planner/tools/memory/policy/agent/event_*…)——
+  它是"数据契约层",本身不依赖其它业务模块(仅引用 runtime_context.RuntimeIdentity)。
+  Agent 组装 AgentRunResult ─▶ trace_view 展示 / event_writer 落盘 / eval_harness 统计。
+"""
+
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
+
+from .runtime_context import RuntimeIdentity
 
 
 # Literal["tool", "final"] 表示 Action.type 只能是这两个字符串之一。
@@ -111,6 +132,7 @@ class Observation:
     elapsed_ms: int
     output: Any = None
     error: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -122,6 +144,8 @@ class Observation:
             "output": self.output,
             # 工具失败时的错误原因。成功时为 None。
             "error": self.error,
+            # 工具执行的审计元数据,例如 attempt、timeoutMs、idempotencyKey。
+            "metadata": dict(self.metadata),
         }
 
 
@@ -260,6 +284,9 @@ class MemoryRecord:
     status: MemoryStatus = "active"
     archived_at: str | None = None
     archive_reason: str | None = None
+    importance: int = 0
+    expires_at: str | None = None
+    merged_from: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -287,6 +314,12 @@ class MemoryRecord:
             "archivedAt": self.archived_at,
             # 归档原因。未归档时为 None。
             "archiveReason": self.archive_reason,
+            # 重要性评分,0-100。后续可用于排序、压缩和清理。
+            "importance": self.importance,
+            # 过期时间。None 表示没有自动过期策略。
+            "expiresAt": self.expires_at,
+            # 被语义合并进当前记忆的历史文本快照。
+            "mergedFrom": list(self.merged_from),
         }
 
 
@@ -391,6 +424,7 @@ class AgentRunState:
     goal: str
     status: RunStatus
     started_at: str
+    identity: RuntimeIdentity = field(default_factory=RuntimeIdentity)
     step: int = 0
     safety_decision: SafetyDecision | None = None
     memory_decision: MemoryDecision | None = None
@@ -410,6 +444,7 @@ class AgentRunResult:
     goal: str
     status: RunStatus
     answer: str
+    identity: RuntimeIdentity
     safety_decision: SafetyDecision
     memory_decision: MemoryDecision | None
     response_decision: Any
@@ -434,6 +469,8 @@ class AgentRunResult:
             "status": self.status,
             # 最终回复给用户的文本。
             "answer": self.answer,
+            # 本次运行的身份/租户上下文。
+            "identity": self.identity.to_dict(),
             # MemoryPolicy 的判断结果; safety 拦截时用 skipped 占位。
             "memoryDecision": memory_decision_data,
             # SafetyPolicy 的判断结果。

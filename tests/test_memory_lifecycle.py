@@ -17,6 +17,7 @@ def test_memory_store_deduplicates_exact_long_term_memories() -> None:
     assert len(memory.long_term_memories) == 1
     assert memory.long_term_memories[0].reason == "first"
     assert memory.long_term_memories[0].updated_at is not None
+    assert memory.long_term_memories[0].importance >= 0
 
 
 def test_json_memory_store_keeps_deduplicated_memory_after_reload(tmp_path) -> None:
@@ -112,3 +113,88 @@ def test_agent_touches_memory_when_planner_receives_snapshot() -> None:
 
     assert record.access_count >= 1
     assert record.last_accessed_at is not None
+
+
+def test_semantic_merge_updates_user_tech_stack_memory() -> None:
+    memory = MemoryStore()
+
+    first = memory.add_long_term_memory(
+        "user_profile",
+        "用户技术栈: Node.js、React、Codex",
+        "old profile",
+        {"user_profile": 5, "stability": 5},
+    )
+    second = memory.add_long_term_memory(
+        "user_profile",
+        "用户技术栈: Python、FastAPI、React",
+        "new profile",
+        {"user_profile": 5, "stability": 5, "explicit_memory_intent": 5},
+    )
+
+    assert first == second
+    assert len(memory.long_term_memories) == 1
+    assert second.text == "用户技术栈: Python、FastAPI、React"
+    assert second.reason == "new profile"
+    assert second.merged_from == ["用户技术栈: Node.js、React、Codex"]
+    assert second.importance >= first.importance
+
+
+def test_task_state_gets_default_expiry_and_can_be_archived() -> None:
+    memory = MemoryStore()
+    record = memory.add_long_term_memory(
+        "task_state",
+        "任务状态: 正在实现 Memory Lifecycle",
+        "temporary task state",
+        {"task_continuity": 5},
+    )
+
+    assert record.expires_at is not None
+
+    archived = memory.archive_expired_long_term_memories("2100-01-01T00:00:00+00:00")
+
+    assert archived == [record]
+    assert record.status == "archived"
+    assert record.archive_reason == "expired"
+    assert memory.snapshot().long_term_memories == []
+
+
+def test_snapshot_auto_archives_expired_task_state() -> None:
+    memory = MemoryStore()
+    record = memory.add_long_term_memory("task_state", "任务状态: 临时任务", "test", {})
+    record.expires_at = "2000-01-01T00:00:00+00:00"
+
+    snapshot = memory.snapshot()
+
+    assert snapshot.long_term_memories == []
+    assert record.status == "archived"
+    assert record.archive_reason == "expired"
+
+
+def test_prune_long_term_memories_archives_low_value_active_memories() -> None:
+    memory = MemoryStore()
+    high = memory.add_long_term_memory(
+        "user_profile",
+        "用户技术栈: Python",
+        "important",
+        {"user_profile": 5, "stability": 5},
+    )
+    low = memory.add_long_term_memory("long_term_note", "长期笔记: 临时想法", "low", {})
+    medium = memory.add_long_term_memory("preference", "用户偏好: 学习任务控制在 30 分钟以内", "medium", {})
+    memory.touch_long_term_memory(medium.id)
+
+    archived = memory.prune_long_term_memories(max_active=2)
+
+    assert archived == [low]
+    assert low.status == "archived"
+    assert high.status == "active"
+    assert medium.status == "active"
+    assert [item.id for item in memory.snapshot().long_term_memories] == [high.id, medium.id]
+
+
+def test_update_long_term_memory_importance_clamps_to_valid_range() -> None:
+    memory = MemoryStore()
+    record = memory.add_long_term_memory("long_term_note", "长期笔记: x", "test", {})
+
+    updated = memory.update_long_term_memory_importance(record.id, 999)
+
+    assert updated.importance == 100

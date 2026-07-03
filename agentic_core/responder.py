@@ -1,3 +1,16 @@
+"""responder — 无工具轮的自然语言回复(结构化满足 contracts.Responder)。
+
+功能:
+  - LlmResponder.reply(goal, memory_snapshot): 当本轮不需要任何工具(纯闲聊/陈述)时,
+    用 LLM 把长期记忆当上下文生成一句自然回复,而不是套任务报告模板。
+  - 和其它 LLM 组件一样: 不可用或返回空 -> 回退到固定能力引导语 FALLBACK_REPLY。
+  - 只管"表达",不决定该不该追问/拒绝/确认(那是 ResponsePolicy 的事)。
+
+调用关系图:
+  Agent(本轮无工具时) / ResponsePolicy(normal_responder 兜底档)
+      └─▶ LlmResponder.reply(goal, memory_snapshot) ─▶ LlmClient.chat ─▶ 自然语言 or FALLBACK_REPLY
+"""
+
 from __future__ import annotations
 
 import json

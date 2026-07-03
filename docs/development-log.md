@@ -9,7 +9,7 @@ scope: agentic_core
 
 本轮围绕一次代码评审展开，逐条修掉了发现的问题，并按"每步小改动 → 跑测试 → 看过程"的方式推进。全部改动零新依赖，风格与既有的"规则层 + LLM 层 + 程序把关"一致。
 
-后续又补齐了 Typed State、Persistent Event Log、JSON 记忆持久化、学习计划工具、Eval Harness、Tool Metadata、Middleware Pipeline、Memory Lifecycle、结构化 SafetyPolicy，以及 Ollama `format:"json"`。当前收尾状态：**pytest 113 passed / mypy success / eval harness 5 passed**。
+后续又补齐了 Typed State、Persistent Event Log、JSON 记忆持久化、学习计划工具、Eval Harness、Tool Metadata、Middleware Pipeline、Memory Lifecycle、结构化 SafetyPolicy，以及 Ollama `format:"json"`。当前收尾状态：**pytest 152 passed / mypy success / eval harness 8 passed**。
 
 ---
 
@@ -69,30 +69,36 @@ scope: agentic_core
 Agent.run(goal)
   -> SafetyPolicy(check)            # 请求级全局安全拦截,命中即拒绝整轮
   -> MemoryPolicy(evaluate)         # 规则版 或 LLM版(程序把关+敏感一票否决)
-  -> [save active long-term memory] # 精确去重 + 生命周期字段
+  -> [save active long-term memory] # 精确去重 + 规则语义合并 + 生命周期治理
   -> Plan-Act-Observe loop
        Planner(next)                # HermesPlanner(LLM) -> RuleBasedPlanner(兜底)
-       MiddlewarePipeline           # 审批/成本等横切逻辑
+       MiddlewarePipeline           # 审批/成本/timeout/retry/tracing/idempotency
        ToolRegistry.execute         # 写入类工具敏感守卫;ToolSpec 治理元数据
        Observation
   -> ResponsePolicy.decide          # 拦截/组合/兜底分层,输出可审计 ResponseDecision
   -> Final Answer
 ```
 
-可观测：`AGENTIC_TRACE=brief` 打印记忆决策(llm/fallback)、每步动作/工具结果、回退原因+模型原始输出、ResponseDecision 的 tiers/reason。`AGENTIC_EVENT_LOG=jsonl` 可追加写入 JSONL 事件日志,`agentic_core.event_log` 可按 runId 查看时间线。JSONL 写入默认启用同名 `.lock` 文件,保护大小轮转和追加写入;事件查看默认读取轮转备份,也可用 `--current-only` 只看当前文件。
+可观测：`AGENTIC_TRACE=brief` 打印记忆决策(llm/fallback)、每步动作/工具结果、回退原因+模型原始输出、ResponseDecision 的 tiers/reason。`AGENTIC_EVENT_LOG=jsonl|sqlite` 可追加写入本地事件日志,`agentic_core.event_log` 可按 runId 查看时间线。JSONL 写入默认启用同名 `.lock` 文件,保护大小轮转和追加写入;事件查看默认读取轮转备份,也可用 `--current-only` 只看当前文件。SQLite 后端使用 `data/events.db`,支持本地结构化查询。
 
 新增模块：`memory_policy.LlmMemoryPolicy` / `response_policy` / `responder` / `trace_view` / `json_utils` / `event_writer` / `event_log` / `eval_harness` / `middleware`。
 
-环境开关：`AGENTIC_MODEL` / `AGENTIC_PLANNER` / `AGENTIC_MEMORY_POLICY` / `AGENTIC_TRACE` / `AGENTIC_MEMORY_STORE` / `AGENTIC_MEMORY_PATH` / `AGENTIC_EVENT_LOG` / `AGENTIC_EVENT_LOG_PATH` / `AGENTIC_EVENT_LOG_LOCK`（+ 兼容 `AGENTIC_CHAT_DEBUG`）。
+文档结构：README 已收束为入口页,细节拆入 `docs/tutorial.md`、`docs/architecture.md`、`docs/operations.md`、`docs/evals.md`、`docs/acceptance-checklist.md`。七阶段完成度和生产缺口见 `docs/production-readiness-audit.md`。
+
+Eval Harness：默认 8 个确定性用例,覆盖计算+笔记、长期记忆保存、记忆影响学习计划、安全拒绝、敏感记忆拒绝、技术栈追问、技术栈保存、计算失败不写笔记。报告包含 case pass rate、工具成功率、预期工具失败、事件计数、ResponsePolicy tiers 和质量门禁(`EvalThresholds`)。
+
+Middleware Pipeline：工具执行已统一进入 `MiddlewarePipeline.execute_tool()`。`RuntimeIdentity` 提供 user/tenant/roles/permission scopes 学习版身份上下文。`ToolSpec.timeoutMs`、`retryCount`、`costUnits`、`requiresApproval`、`permissionScope`、`sideEffect`、`riskLevel` 会进入执行控制和 `Observation.metadata`,为审计、预算、幂等和排障打基础。`ToolGovernancePolicy` 已支持 allowed/denied permission scopes、risk/side-effect 审批策略和 tenant+run 级 cost budget。
+
+环境开关：`AGENTIC_MODEL` / `AGENTIC_PLANNER` / `AGENTIC_MEMORY_POLICY` / `AGENTIC_SAFETY_POLICY` / `AGENTIC_SAFETY_FAIL_CLOSED` / `AGENTIC_USER_ID` / `AGENTIC_TENANT_ID` / `AGENTIC_ROLES` / `AGENTIC_PERMISSION_SCOPES` / `AGENTIC_TRACE` / `AGENTIC_MEMORY_STORE` / `AGENTIC_MEMORY_PATH` / `AGENTIC_EVENT_LOG` / `AGENTIC_EVENT_LOG_PATH` / `AGENTIC_EVENT_LOG_MAX_BYTES` / `AGENTIC_EVENT_LOG_BACKUP_COUNT` / `AGENTIC_EVENT_LOG_LOCK`（+ 兼容 `AGENTIC_CHAT_DEBUG`）。
 
 ---
 
 ## 遗留 / 未做（按优先级）
 
-- **[中] Memory Lifecycle 仍是基础版**：已支持 active/archived、访问统计、精确去重;语义合并、重要性排序、过期策略、归档策略仍未做。
-- **[中] Event Log 后端仍是本地 JSONL**：已具备 EventWriter 抽象、JSONL、大小轮转/备份保留、基础文件锁、轮转备份读取、timeline、eval 统计;数据库后端、集中式可观测平台、分布式级别并发治理未做。
-- **[中] SafetyPolicy 仍是规则版**：已结构化类别、风险、规则 id 和置信度;真实生产还应接 LLM/moderation 多层判断。
-- **[低] README/文档可继续拆分**：README 已能跑通实操,但内容越来越长,后续可拆成 tutorial / architecture / operations。
+- **[中] Memory Lifecycle 仍是规则版**：已支持 active/archived、访问统计、精确去重、技术栈/学习时长偏好的规则语义合并、importance、expiresAt、retention 归档;embedding 语义合并、人工审核工作流、租户级保留策略仍未做。
+- **[中] Event Log 后端仍是本地学习版**：已具备 EventWriter 抽象、JSONL、SQLite、大小轮转/备份保留、基础文件锁、轮转备份读取、timeline、eval 统计;Postgres/ClickHouse/OTel、集中式可观测平台、分布式级别并发治理未做。
+- **[中] SafetyPolicy 已有生产化骨架**：已支持规则 checker、LLM checker、CompositeSafetyPolicy 多 checker 汇总、allow/warn/review/refuse 分级动作、fail-open/fail-closed 配置和结构化审计 metadata;真实生产还应接外部 moderation、人审队列、租户级安全策略和更完整的策略包。
+- **[低] 文档持续维护**：README 已拆分为入口页 + tutorial / architecture / operations / evals / acceptance checklist;后续只需随功能演进同步更新。
 
 已在后续修掉：
 
@@ -105,10 +111,11 @@ Agent.run(goal)
 
 ```bash
 cd /Users/jurongchao/Desktop/ai学习测试库/agentic
-.venv/bin/python -m pytest -q  # 113 passed
+.venv/bin/python -m pytest -q  # 152 passed
 .venv/bin/python -m mypy agentic_core
 python3 -m compileall agentic_core examples tests
 python3 -m agentic_core.eval_harness
+python3 -m agentic_core.eval_harness --json
 ```
 
 LLM 相关全部用 stub client 覆盖，不依赖真实 Ollama；真实 Ollama 仅用于端到端手动验证。

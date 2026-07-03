@@ -1,3 +1,22 @@
+"""tools — 工具注册与执行(把"思考"和"行动"隔离开)。
+
+功能:
+  - ToolRegistry 注册内置工具(calculator/note.add/todo.add/todo.list/memory.add/study.plan),
+    LLM/Planner 只输出"调哪个工具+参数", 由 registry 找到并执行 —— 系统更可控。
+  - ToolSpec: 类型化的工具定义 + 治理元数据(input_schema=参数真相源、side_effect、
+    guard_sensitive、以及 timeout/retry/cost/approval/permission_scope/risk 等给中间件用)。
+  - 执行层守卫: 写入类工具执行前用共享 SENSITIVE_PATTERN 拦敏感输入(命中即 raise, 不落地、不回显)。
+  - memory.add 特殊: 强制经 MemoryPolicy 网关(_memory_add), 模型不能绕过阈值/敏感检查直接写长期记忆。
+  - calculator 用 ast 白名单求值, 不用 eval(不给任意代码执行)。
+
+调用关系图:
+  Agent ─▶ MiddlewarePipeline.execute_tool ─▶ ToolRegistry.execute(name, input)
+                                                ├─ guard_sensitive: _contains_sensitive(SENSITIVE_PATTERN)
+                                                └─ ToolSpec.execute(...) ─▶ MemoryStore.add_* / safe_eval / _memory_add
+  ToolRegistry.list() ─▶ Planner(可用工具清单 + inputSchema 真相源)
+  _memory_add ─▶ MemoryPolicy.evaluate(记忆网关)
+"""
+
 from __future__ import annotations
 
 import ast
@@ -33,6 +52,7 @@ class ToolSpec:
     permission_scope: str = "tool:read"
     timeout_ms: int = 1000
     cost_units: int = 1
+    retry_count: int = 0
     risk_level: RiskLevel = "low"
     requires_approval: bool = False
     version: str = "1.0"
@@ -48,6 +68,7 @@ class ToolSpec:
             "permissionScope": self.permission_scope,
             "timeoutMs": self.timeout_ms,
             "costUnits": self.cost_units,
+            "retryCount": self.retry_count,
             "riskLevel": self.risk_level,
             "requiresApproval": self.requires_approval,
             "guardSensitive": self.guard_sensitive,
@@ -128,6 +149,7 @@ class ToolRegistry:
         permission_scope: str | None = None,
         timeout_ms: int = 1000,
         cost_units: int = 1,
+        retry_count: int = 0,
         risk_level: RiskLevel = "low",
         requires_approval: bool = False,
         version: str = "1.0",
@@ -149,6 +171,7 @@ class ToolRegistry:
             permission_scope=permission_scope or _default_permission_scope(name, side_effect),
             timeout_ms=timeout_ms,
             cost_units=cost_units,
+            retry_count=max(0, retry_count),
             risk_level=risk_level,
             requires_approval=requires_approval,
             version=version,

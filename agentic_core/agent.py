@@ -1,3 +1,27 @@
+"""agent — 编排中枢(Plan-Act-Observe loop 的"总导演")。
+
+功能:
+  - Agent 自己不理解自然语言、也不直接算/写记忆; 只按契约编排各角色, 并把每一步
+    记成结构化事件(EventRecord)。
+  - run_typed(goal) 返回强类型 AgentRunResult; run(goal) 返回等价 dict(兼容 cli/chat)。
+  - 依赖全部按 Protocol 注入(planner/memory_policy/responder/response_policy/safety_policy/
+    middleware_pipeline/identity), 可替换、可离线、可测。
+  - 若本轮无工具意图(闲聊/纯记忆确认)则 _should_skip_planner 跳过 Planner, 避免双 LLM 调用。
+
+一次 run 的调用关系图:
+  Agent.run_typed(goal) ─▶ _run_typed_body
+    1) SafetyPolicy.check(goal)            —— refuse 则 global_safety, 跳过下面一切
+    2) MemoryPolicy.evaluate(goal)         —— 决定是否存长期记忆(+敏感一票否决)
+       └─▶ MemoryStore.add_long_term_memory (若 save)
+    3) for step in loop:
+         Planner.next(PlannerContext)      —— 选 Action(tool / final)
+         MiddlewarePipeline.execute_tool ─▶ ToolRegistry.execute   —— 审批/成本/守卫 + 执行
+         └─▶ Observation ─▶ TraceStep
+    4) ResponsePolicy.decide(ResponseContext) ─▶ ResponseDecision  —— 仲裁最终回复
+  每步都 _record_event ─▶ MemoryStore.record_event ─▶ EventWriter(内存/JSONL/SQLite)
+  产物 AgentRunResult ─▶ cli/chat 用 trace_view 展示; eval_harness 读事件算指标。
+"""
+
 from __future__ import annotations
 
 import time
@@ -15,6 +39,7 @@ from .contracts import (
 from .memory import MemoryStore, now_iso
 from .middleware import MiddlewarePipeline, ToolCallContext
 from .response_policy import ResponseContext, ResponseDecision, RuleBasedResponsePolicy
+from .runtime_context import RuntimeIdentity
 from .safety_policy import RuleBasedSafetyPolicy
 from .schemas import (
     Action,
@@ -52,6 +77,7 @@ class Agent:
         response_policy: ResponsePolicy | None = None,
         safety_policy: SafetyPolicy | None = None,
         middleware_pipeline: MiddlewarePipeline | None = None,
+        identity: RuntimeIdentity | None = None,
     ) -> None:
         self.planner = planner
         self.responder = responder
@@ -62,6 +88,7 @@ class Agent:
         self.memory_policy = memory_policy
         self.max_steps = max_steps
         self.middleware_pipeline = middleware_pipeline or MiddlewarePipeline.default()
+        self.identity = identity or RuntimeIdentity()
 
     def run(self, goal: str) -> dict[str, Any]:
         """兼容旧入口: 返回 CLI/Chat 已经习惯的 dict 结构。"""
@@ -81,8 +108,9 @@ class Agent:
             goal=goal,
             status="running",
             started_at=now_iso(),
+            identity=self.identity,
         )
-        self._record_event(state, "run_started", {"goal": goal})
+        self._record_event(state, "run_started", {"goal": goal, "identity": self.identity.to_dict()})
         safety_decision = SafetyDecision(refuse=False, category="none", reason="not checked")
         memory_decision: MemoryDecision | None = None
         try:
@@ -380,17 +408,12 @@ class Agent:
                 step=state.step,
                 action=action,
                 tool=tool,
+                identity=state.identity,
             )
-            short_circuit = self.middleware_pipeline.before_tool(context)
-            if short_circuit is not None:
-                return short_circuit
-            output = self.tools.execute(action.tool_name, action.input)
-            observation = Observation(
-                ok=True,
-                output=output,
-                elapsed_ms=int((time.time() - started_at) * 1000),
+            return self.middleware_pipeline.execute_tool(
+                context,
+                lambda: self.tools.execute(action.tool_name or "", action.input),
             )
-            return self.middleware_pipeline.after_tool(context, observation)
         except Exception as error:
             return Observation(
                 ok=False,
@@ -464,13 +487,14 @@ class Agent:
         self._record_event(
             state,
             "run_completed",
-            {"status": status, "answer": answer},
+            {"status": status, "answer": answer, "identity": state.identity.to_dict()},
         )
         return AgentRunResult(
             run_id=state.run_id,
             goal=state.goal,
             status=status,
             answer=answer,
+            identity=state.identity,
             safety_decision=safety_decision,
             memory_decision=memory_decision,
             response_decision=response_decision,
@@ -509,6 +533,7 @@ class Agent:
                 "error": str(error),
                 "errorType": error.__class__.__name__,
                 "goal": goal,
+                "identity": state.identity.to_dict(),
             },
             level="error",
         )
@@ -517,6 +542,7 @@ class Agent:
             goal=state.goal,
             status="failed",
             answer=answer,
+            identity=state.identity,
             safety_decision=safety_decision,
             memory_decision=memory_decision,
             response_decision=response_decision,

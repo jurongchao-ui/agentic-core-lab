@@ -1,8 +1,26 @@
+"""memory — 记忆库(notes/todos/长期记忆/事件)+ 生命周期治理 + 持久化。
+
+功能:
+  - MemoryStore(进程内存版): 笔记/待办/长期记忆/事件的读写; snapshot() 给 planner/responder 只读快照。
+  - 长期记忆生命周期: 精确 + 规则语义去重(_memory_semantic_key)、active/archived 状态、
+    访问统计(touch)、importance、expiresAt 过期归档、retention 数量上限裁剪。
+  - 事件: record_event 构造 EventRecord 并交给 EventWriter(内存/JSONL/SQLite);
+    写盘前用 redact_event 复用 SENSITIVE_PATTERN 脱敏。
+  - JsonMemoryStore(子类): 每次写操作后落盘 data/memory.json, 启动时 load, 实现跨进程记忆持久化。
+  - build_memory_store_from_env: 按 AGENTIC_MEMORY_STORE/PATH 选内存版还是 JSON 持久化版。
+
+调用关系图:
+  Agent ─▶ MemoryStore.add_long_term_memory / add_note / add_todo / snapshot / record_event
+  tools ─▶ MemoryStore.add_note/add_todo/list_todos/add_long_term_memory(经 memory.add 网关)
+  record_event ─▶ EventWriter.write(EventRecord)  (event_writer: 内存 + JSONL/SQLite, 可脱敏)
+  cli/chat ─▶ build_memory_store_from_env() ─▶ MemoryStore | JsonMemoryStore
+"""
+
 from __future__ import annotations
 
 import json
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -81,20 +99,40 @@ class MemoryStore:
         """新增一条长期记忆。
 
         精确重复的长期记忆直接返回已有记录,避免用户多次表达同一偏好时不断膨胀。
+        规则能识别的同主题记忆会做语义合并,例如“用户技术栈”后续更新时只保留一条 active 记忆。
         """
+        scores_data = dict(scores)
         existing = self.find_long_term_memory(memory_type=memory_type, text=text)
         if existing:
             existing.updated_at = now_iso()
+            existing.importance = max(existing.importance, _memory_importance(memory_type, scores_data))
             return existing
+        semantic_match = self.find_semantic_long_term_memory(memory_type=memory_type, text=text)
+        if semantic_match:
+            now = now_iso()
+            if semantic_match.text not in semantic_match.merged_from:
+                semantic_match.merged_from.append(semantic_match.text)
+            semantic_match.text = text
+            semantic_match.reason = reason
+            semantic_match.scores = scores_data
+            semantic_match.importance = max(
+                semantic_match.importance,
+                _memory_importance(memory_type, scores_data),
+            )
+            semantic_match.expires_at = _default_memory_expiry(memory_type, now)
+            semantic_match.updated_at = now
+            return semantic_match
         created_at = now_iso()
         memory = MemoryRecord(
             id=f"memory_{len(self.long_term_memories) + 1}",
             memory_type=memory_type,
             text=text,
             reason=reason,
-            scores=dict(scores),
+            scores=scores_data,
             created_at=created_at,
             updated_at=created_at,
+            importance=_memory_importance(memory_type, scores_data),
+            expires_at=_default_memory_expiry(memory_type, created_at),
         )
         self.long_term_memories.append(memory)
         return memory
@@ -112,10 +150,68 @@ class MemoryStore:
                 return memory
         return None
 
+    def find_semantic_long_term_memory(self, memory_type: str, text: str) -> MemoryRecord | None:
+        """查找同类型、同主题的 active 长期记忆。
+
+        这是学习版语义合并:先用可解释规则识别少量高价值主题。
+        生产里可以把 `_memory_semantic_key` 替换成 embedding/向量检索或数据库唯一键。
+        """
+
+        semantic_key = _memory_semantic_key(memory_type, text)
+        if semantic_key is None:
+            return None
+        for memory in self.long_term_memories:
+            if memory.status != "active":
+                continue
+            if memory.memory_type != memory_type:
+                continue
+            if _memory_semantic_key(memory.memory_type, memory.text) == semantic_key:
+                return memory
+        return None
+
     def list_active_long_term_memories(self) -> list[MemoryRecord]:
         """返回仍会影响 planner 的 active 长期记忆。"""
 
+        self.archive_expired_long_term_memories()
         return [memory for memory in self.long_term_memories if memory.status == "active"]
+
+    def archive_expired_long_term_memories(self, now: str | None = None) -> list[MemoryRecord]:
+        """归档已经过期的长期记忆。
+
+        task_state 这类阶段性状态默认会有 expires_at。
+        过期后归档而不是删除,方便审计和回放。
+        """
+
+        archived: list[MemoryRecord] = []
+        now_value = _parse_iso(now or now_iso())
+        for memory in self.long_term_memories:
+            if memory.status != "active":
+                continue
+            if not _is_memory_expired(memory, now_value):
+                continue
+            archived.append(self.archive_long_term_memory(memory.id, "expired"))
+        return archived
+
+    def prune_long_term_memories(self, max_active: int, reason: str = "retention_limit") -> list[MemoryRecord]:
+        """按重要性保留最多 max_active 条 active 记忆。
+
+        低重要性、低访问次数、更旧的记忆会先被归档。
+        这是学习版 retention,不是删除策略。
+        """
+
+        if max_active < 0:
+            raise ValueError("max_active must be >= 0")
+        self.archive_expired_long_term_memories()
+        active_memories = self.list_active_long_term_memories()
+        if len(active_memories) <= max_active:
+            return []
+        active_memories.sort(key=_memory_retention_sort_key, reverse=True)
+        keep_ids = {memory.id for memory in active_memories[:max_active]}
+        archived: list[MemoryRecord] = []
+        for memory in active_memories[max_active:]:
+            if memory.id not in keep_ids:
+                archived.append(self.archive_long_term_memory(memory.id, reason))
+        return archived
 
     def touch_long_term_memory(self, memory_id: str) -> MemoryRecord:
         """记录一条长期记忆被读取过。"""
@@ -139,6 +235,14 @@ class MemoryStore:
         memory.archived_at = now
         memory.archive_reason = reason
         memory.updated_at = now
+        return memory
+
+    def update_long_term_memory_importance(self, memory_id: str, importance: int) -> MemoryRecord:
+        """手动调整长期记忆重要性,方便后续人工审核或 eval 调参。"""
+
+        memory = self._get_long_term_memory(memory_id)
+        memory.importance = _clamp_int(importance, 0, 100)
+        memory.updated_at = now_iso()
         return memory
 
     def _get_long_term_memory(self, memory_id: str) -> MemoryRecord:
@@ -275,6 +379,23 @@ class JsonMemoryStore(MemoryStore):
         self.save()
         return memory
 
+    def archive_expired_long_term_memories(self, now: str | None = None) -> list[MemoryRecord]:
+        archived = super().archive_expired_long_term_memories(now)
+        if archived:
+            self.save()
+        return archived
+
+    def prune_long_term_memories(self, max_active: int, reason: str = "retention_limit") -> list[MemoryRecord]:
+        archived = super().prune_long_term_memories(max_active, reason)
+        if archived:
+            self.save()
+        return archived
+
+    def update_long_term_memory_importance(self, memory_id: str, importance: int) -> MemoryRecord:
+        memory = super().update_long_term_memory_importance(memory_id, importance)
+        self.save()
+        return memory
+
     def record_event(
         self,
         event: dict[str, Any] | None = None,
@@ -381,6 +502,9 @@ def _memory_from_dict(data: Any) -> MemoryRecord:
         status=_memory_status(item.get("status")),
         archived_at=_optional_str(item.get("archivedAt") or item.get("archived_at")),
         archive_reason=_optional_str(item.get("archiveReason") or item.get("archive_reason")),
+        importance=_optional_int(item.get("importance"), default=0),
+        expires_at=_optional_str(item.get("expiresAt") or item.get("expires_at")),
+        merged_from=_string_list(item.get("mergedFrom") or item.get("merged_from")),
     )
 
 
@@ -419,5 +543,99 @@ def _optional_str(value: Any) -> str | None:
     return str(value)
 
 
+def _optional_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value]
+
+
 def _memory_status(value: Any) -> MemoryStatus:
     return "archived" if value == "archived" else "active"
+
+
+def _memory_importance(memory_type: str, scores: dict[str, int]) -> int:
+    """根据 MemoryPolicy 评分推导 0-100 的重要性。
+
+    重要性不是“是否保存”的二次判断;是否保存已经由 MemoryPolicy 决定。
+    它用于后续排序、retention 和人工审核。
+    """
+
+    positive_keys = {
+        "future_relevance",
+        "stability",
+        "user_preference",
+        "task_continuity",
+        "explicit_memory_intent",
+        "user_profile",
+    }
+    positive_score = sum(_optional_int(scores.get(key), 0) for key in positive_keys)
+    type_boost = {
+        "user_profile": 30,
+        "preference": 25,
+        "task_state": 15,
+        "task_context": 15,
+        "long_term_note": 10,
+    }.get(memory_type, 5)
+    sensitivity_penalty = _optional_int(scores.get("sensitivity_risk"), 0) * 10
+    return _clamp_int((positive_score * 8) + type_boost - sensitivity_penalty, 0, 100)
+
+
+def _default_memory_expiry(memory_type: str, created_at: str) -> str | None:
+    """给阶段性记忆设置默认过期时间。
+
+    用户资料和长期偏好通常不自动过期;任务状态默认 30 天后归档。
+    """
+
+    if memory_type not in {"task_state", "task_context"}:
+        return None
+    created = _parse_iso(created_at)
+    return (created + timedelta(days=30)).isoformat()
+
+
+def _is_memory_expired(memory: MemoryRecord, now: datetime) -> bool:
+    if memory.expires_at is None:
+        return False
+    return _parse_iso(memory.expires_at) <= now
+
+
+def _parse_iso(value: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return datetime.now(timezone.utc)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _memory_retention_sort_key(memory: MemoryRecord) -> tuple[int, int, float]:
+    timestamp = _parse_iso(memory.updated_at or memory.created_at).timestamp()
+    return (memory.importance, memory.access_count, timestamp)
+
+
+def _memory_semantic_key(memory_type: str, text: str) -> str | None:
+    normalized = _normalize_memory_text(text).lower()
+    compact = (
+        normalized.replace(" ", "")
+        .replace("，", ",")
+        .replace("、", ",")
+        .replace("：", ":")
+    )
+    if memory_type == "user_profile":
+        if "技术栈" in compact or "techstack" in compact or "常用技术" in compact:
+            return "user_profile:tech_stack"
+    if memory_type == "preference":
+        if "学习" in compact and ("分钟" in compact or "时长" in compact or "控制" in compact):
+            return "preference:study_session_duration"
+    return None
+
+
+def _clamp_int(value: int, min_value: int, max_value: int) -> int:
+    return max(min_value, min(max_value, value))

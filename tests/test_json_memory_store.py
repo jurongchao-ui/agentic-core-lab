@@ -52,6 +52,9 @@ def test_json_memory_store_writes_stable_schema(tmp_path) -> None:
     assert data["notes"][0]["createdAt"]
     assert data["long_term_memories"][0]["status"] == "active"
     assert data["long_term_memories"][0]["accessCount"] == 0
+    assert "importance" in data["long_term_memories"][0]
+    assert "expiresAt" in data["long_term_memories"][0]
+    assert data["long_term_memories"][0]["mergedFrom"] == []
 
 
 def test_json_memory_store_persists_memory_lifecycle_fields(tmp_path) -> None:
@@ -69,6 +72,31 @@ def test_json_memory_store_persists_memory_lifecycle_fields(tmp_path) -> None:
     assert loaded_record.last_accessed_at is not None
     assert loaded_record.archive_reason == "过期"
     assert loaded.snapshot().long_term_memories == []
+
+
+def test_json_memory_store_persists_memory_lifecycle_policy_fields(tmp_path) -> None:
+    path = tmp_path / "memory.json"
+    memory = JsonMemoryStore(path)
+    record = memory.add_long_term_memory(
+        "user_profile",
+        "用户技术栈: Node.js、React",
+        "first",
+        {"user_profile": 5, "stability": 5},
+    )
+    memory.add_long_term_memory(
+        "user_profile",
+        "用户技术栈: Python、FastAPI",
+        "second",
+        {"user_profile": 5, "stability": 5, "explicit_memory_intent": 5},
+    )
+
+    loaded = JsonMemoryStore(path)
+    loaded_record = loaded.long_term_memories[0]
+
+    assert loaded_record.id == record.id
+    assert loaded_record.text == "用户技术栈: Python、FastAPI"
+    assert loaded_record.importance > 0
+    assert loaded_record.merged_from == ["用户技术栈: Node.js、React"]
 
 
 def test_json_memory_store_loads_old_memory_without_lifecycle_fields(tmp_path) -> None:
@@ -99,6 +127,8 @@ def test_json_memory_store_loads_old_memory_without_lifecycle_fields(tmp_path) -
     memory = JsonMemoryStore(path)
 
     assert memory.long_term_memories[0].status == "active"
+    assert memory.long_term_memories[0].importance == 0
+    assert memory.long_term_memories[0].merged_from == []
     assert memory.snapshot().long_term_memories[0].text == "用户偏好: 每次 30 分钟"
 
 

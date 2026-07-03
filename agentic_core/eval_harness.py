@@ -1,12 +1,14 @@
 """eval_harness — 确定性行为评测(黄金用例 + 指标统计)。
 
 功能:
-  - EvalCase 声明输入(goal / setup_goals)和期望(工具 / 答案片段 / 记忆保存数 /
-    安全拒绝),让 eval 不只是打印结果、而是能判断好坏。
+  - EvalCase 声明输入(goal / setup_goals)和期望(工具 / 回复档位 / 事件数量 /
+    记忆保存数 / 安全拒绝),让 eval 不只是打印结果、而是能判断好坏。
   - run_eval 用规则版 planner/policy(离线确定性,不依赖 Ollama)跑一组用例。
   - collect_run_metrics / _aggregate_metrics 从事件流统计工具成功率、planner fallback、
     safety 拒绝、memory 保存、平均 step 等行为指标(可用于跨版本对比)。
-  - 命令行入口: python -m agentic_core.eval_harness [--json]; 有失败则退出码非 0(可进 CI)。
+  - EvalThresholds 提供轻量质量门禁,例如 case pass rate / tool success rate /
+    run_failed / planner fallback。
+  - 命令行入口: python -m agentic_core.eval_harness [--json]; 用例失败或门禁失败则退出码非 0。
 
 调用关系图:
   CLI: python -m agentic_core.eval_harness
@@ -47,6 +49,10 @@ class EvalCase:
     expected_answer_contains: list[str] = field(default_factory=list)
     expected_memory_saves: int | None = None
     expected_safety_refusal: bool | None = None
+    expected_tool_failures: int | None = None
+    expected_response_tiers: list[str] = field(default_factory=list)
+    expected_event_counts: dict[str, int] = field(default_factory=dict)
+    expected_memory_contains: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -59,6 +65,8 @@ class EvalCaseResult:
     answer: str
     status: str
     tool_names: list[str]
+    response_tiers: list[str]
+    memory_texts: list[str]
     event_counts: dict[str, int]
     metrics: dict[str, int | float]
 
@@ -74,6 +82,9 @@ class EvalReport:
     passed: int
     failed: int
     metrics: dict[str, int | float]
+    event_counts: dict[str, int]
+    thresholds: dict[str, int | float]
+    gate_failures: list[str]
     cases: list[EvalCaseResult]
 
     def to_dict(self) -> dict[str, Any]:
@@ -81,8 +92,38 @@ class EvalReport:
             "total": self.total,
             "passed": self.passed,
             "failed": self.failed,
+            "passedGate": self.passed_gate,
             "metrics": dict(self.metrics),
+            "eventCounts": dict(self.event_counts),
+            "thresholds": dict(self.thresholds),
+            "gateFailures": list(self.gate_failures),
             "cases": [case.to_dict() for case in self.cases],
+        }
+
+    @property
+    def passed_gate(self) -> bool:
+        return self.failed == 0 and not self.gate_failures
+
+
+@dataclass
+class EvalThresholds:
+    """eval 汇总级质量门禁。
+
+    用例断言负责“单条行为是否正确”。
+    阈值负责“整套系统指标是否退化”,适合放进 CI。
+    """
+
+    min_case_pass_rate: float = 1.0
+    min_tool_success_rate: float = 0.75
+    max_run_failed: int = 0
+    max_planner_fallbacks: int = 0
+
+    def to_dict(self) -> dict[str, int | float]:
+        return {
+            "minCasePassRate": self.min_case_pass_rate,
+            "minToolSuccessRate": self.min_tool_success_rate,
+            "maxRunFailed": self.max_run_failed,
+            "maxPlannerFallbacks": self.max_planner_fallbacks,
         }
 
 
@@ -120,11 +161,40 @@ DEFAULT_EVAL_CASES = [
         expected_tools=[],
         expected_answer_contains=["不适合进入长期记忆"],
         expected_memory_saves=0,
+        expected_response_tiers=["local_safety"],
+    ),
+    EvalCase(
+        name="tech_stack_clarification",
+        goal="请把我的技术栈计入到长期记忆里",
+        expected_status="clarification",
+        expected_tools=[],
+        expected_answer_contains=["技术栈"],
+        expected_memory_saves=0,
+        expected_response_tiers=["clarification"],
+        expected_event_counts={"memory_clarification": 1},
+    ),
+    EvalCase(
+        name="tech_stack_save",
+        goal="我的技术栈是 Node.js 和 React，Codex",
+        expected_tools=[],
+        expected_answer_contains=["已记住", "用户技术栈"],
+        expected_memory_saves=1,
+        expected_response_tiers=["memory_confirmation"],
+        expected_memory_contains=["用户技术栈"],
+    ),
+    EvalCase(
+        name="failed_calculation_blocks_note",
+        goal="帮我算 128 / 0，然后记成笔记",
+        expected_tools=["calculator"],
+        expected_answer_contains=["计算失败", "没有记录学习笔记"],
+        expected_tool_failures=1,
+        expected_response_tiers=["failure_incomplete"],
+        expected_event_counts={"tool_observation": 1},
     ),
 ]
 
 
-def run_eval(cases: list[EvalCase] | None = None) -> EvalReport:
+def run_eval(cases: list[EvalCase] | None = None, thresholds: EvalThresholds | None = None) -> EvalReport:
     """运行 eval 用例并返回结构化报告。
 
     使用规则 planner/policy,保证本地确定性,不依赖 Ollama。
@@ -132,11 +202,18 @@ def run_eval(cases: list[EvalCase] | None = None) -> EvalReport:
 
     results = [run_eval_case(case) for case in (cases or DEFAULT_EVAL_CASES)]
     passed = sum(1 for result in results if result.passed)
+    metrics = _aggregate_metrics(results)
+    event_counts = _aggregate_event_counts(results)
+    thresholds = thresholds or EvalThresholds()
+    gate_failures = _check_thresholds(metrics, thresholds)
     return EvalReport(
         total=len(results),
         passed=passed,
         failed=len(results) - passed,
-        metrics=_aggregate_metrics(results),
+        metrics=metrics,
+        event_counts=event_counts,
+        thresholds=thresholds.to_dict(),
+        gate_failures=gate_failures,
         cases=results,
     )
 
@@ -165,6 +242,8 @@ def run_eval_case(case: EvalCase) -> EvalCaseResult:
         answer=result.answer,
         status=result.status,
         tool_names=_tool_names(result),
+        response_tiers=list(result.response_decision.tiers),
+        memory_texts=[memory.text for memory in result.memory_snapshot.long_term_memories],
         event_counts=_event_counts(result),
         metrics=metrics,
     )
@@ -205,14 +284,22 @@ def format_eval_report(report: EvalReport) -> str:
     lines = [
         "Agentic Eval Report",
         f"Cases: {report.passed}/{report.total} passed",
+        f"Gate: {'PASS' if report.passed_gate else 'FAIL'}",
         "Metrics:",
     ]
     for key, value in report.metrics.items():
         lines.append(f"- {key}: {value}")
+    if report.gate_failures:
+        lines.append("Gate Failures:")
+        for failure in report.gate_failures:
+            lines.append(f"- {failure}")
     lines.append("Cases:")
     for case in report.cases:
         mark = "PASS" if case.passed else "FAIL"
-        lines.append(f"- {mark} {case.name}: status={case.status}, tools={case.tool_names}")
+        lines.append(
+            f"- {mark} {case.name}: status={case.status}, tools={case.tool_names}, "
+            f"tiers={case.response_tiers}"
+        )
         for failure in case.failures:
             lines.append(f"  - {failure}")
     return "\n".join(lines)
@@ -252,6 +339,31 @@ def _check_expectations(case: EvalCase, result: AgentRunResult) -> list[str]:
         if refused != case.expected_safety_refusal:
             failures.append(f"safety_refusal expected {case.expected_safety_refusal}, got {refused}")
 
+    # 6) 工具失败次数。用于确认“失败被正确处理”,而不是把失败当成未知回归。
+    if case.expected_tool_failures is not None:
+        tool_failures = int(collect_run_metrics(result)["tool_failures"])
+        if tool_failures != case.expected_tool_failures:
+            failures.append(f"tool_failures expected {case.expected_tool_failures}, got {tool_failures}")
+
+    # 7) ResponsePolicy 档位。比完整文案更稳定,能防 responder/planner 覆盖系统事实。
+    tiers = list(result.response_decision.tiers)
+    for tier in case.expected_response_tiers:
+        if tier not in tiers:
+            failures.append(f"missing response tier: {tier}")
+
+    # 8) 事件计数。用于验证关键生命周期事件确实 emit。
+    event_counts = _event_counts(result)
+    for event_type, expected_count in case.expected_event_counts.items():
+        actual_count = event_counts.get(event_type, 0)
+        if actual_count != expected_count:
+            failures.append(f"{event_type} expected {expected_count}, got {actual_count}")
+
+    # 9) 记忆快照内容。用于验证长期记忆真实进入 snapshot,不是只说“已保存”。
+    memory_text = "\n".join(memory.text for memory in result.memory_snapshot.long_term_memories)
+    for text in case.expected_memory_contains:
+        if text not in memory_text:
+            failures.append(f"memory missing text: {text}")
+
     return failures
 
 
@@ -270,15 +382,50 @@ def _aggregate_metrics(results: list[EvalCaseResult]) -> dict[str, int | float]:
     total_tool_calls = sum(int(result.metrics["tool_calls"]) for result in results)
     total_tool_successes = sum(int(result.metrics["tool_successes"]) for result in results)
     total_steps = sum(int(result.metrics["steps"]) for result in results)
+    passed_cases = sum(1 for result in results if result.passed)
     return {
+        "case_pass_rate": passed_cases / len(results) if results else 1.0,
         "tool_calls": total_tool_calls,
+        "tool_failures": sum(int(result.metrics["tool_failures"]) for result in results),
         "tool_success_rate": total_tool_successes / total_tool_calls if total_tool_calls else 1.0,
         "planner_fallbacks": sum(int(result.metrics["planner_fallbacks"]) for result in results),
         "safety_refusals": sum(int(result.metrics["safety_refusals"]) for result in results),
         "memory_saved": sum(int(result.metrics["memory_saved"]) for result in results),
+        "memory_decisions": sum(int(result.metrics["memory_decisions"]) for result in results),
         "run_failed": sum(int(result.metrics["run_failed"]) for result in results),
         "avg_steps": total_steps / len(results) if results else 0.0,
     }
+
+
+def _aggregate_event_counts(results: list[EvalCaseResult]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for result in results:
+        for event_type, count in result.event_counts.items():
+            counts[event_type] = counts.get(event_type, 0) + count
+    return counts
+
+
+def _check_thresholds(metrics: dict[str, int | float], thresholds: EvalThresholds) -> list[str]:
+    failures: list[str] = []
+    case_pass_rate = float(metrics.get("case_pass_rate", 0.0))
+    if case_pass_rate < thresholds.min_case_pass_rate:
+        failures.append(
+            f"case_pass_rate expected >= {thresholds.min_case_pass_rate}, got {case_pass_rate}"
+        )
+    tool_success_rate = float(metrics.get("tool_success_rate", 0.0))
+    if tool_success_rate < thresholds.min_tool_success_rate:
+        failures.append(
+            f"tool_success_rate expected >= {thresholds.min_tool_success_rate}, got {tool_success_rate}"
+        )
+    run_failed = int(metrics.get("run_failed", 0))
+    if run_failed > thresholds.max_run_failed:
+        failures.append(f"run_failed expected <= {thresholds.max_run_failed}, got {run_failed}")
+    planner_fallbacks = int(metrics.get("planner_fallbacks", 0))
+    if planner_fallbacks > thresholds.max_planner_fallbacks:
+        failures.append(
+            f"planner_fallbacks expected <= {thresholds.max_planner_fallbacks}, got {planner_fallbacks}"
+        )
+    return failures
 
 
 def main() -> int:
@@ -291,7 +438,7 @@ def main() -> int:
         print(json.dumps(report.to_dict(), ensure_ascii=False, indent=2))
     else:
         print(format_eval_report(report))
-    return 0 if report.failed == 0 else 1
+    return 0 if report.passed_gate else 1
 
 
 if __name__ == "__main__":

@@ -79,6 +79,6 @@ class LlmClient(Protocol):
 
 @runtime_checkable
 class SafetyPolicy(Protocol):
-    """请求级安全拦截。实现: RuleBasedSafetyPolicy。"""
+    """请求级安全拦截。实现: RuleBasedSafetyPolicy / LlmSafetyPolicy / CompositeSafetyPolicy。"""
 
     def check(self, text: str) -> SafetyDecision: ...

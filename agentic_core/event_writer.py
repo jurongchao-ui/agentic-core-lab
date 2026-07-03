@@ -1,10 +1,11 @@
-"""event_writer — 事件写入后端(内存 / JSONL / 组合)+ 脱敏。
+"""event_writer — 事件写入后端(内存 / JSONL / SQLite / 组合)+ 脱敏。
 
 功能:
   - EventWriter 协议 + 三个实现:
       MemoryEventWriter    —— 写进程内 events 列表(默认,保持原行为)。
       JsonlEventWriter     —— 追加写 data/events.jsonl,含按大小轮转 + 文件锁(fcntl,
                               非 POSIX 平台降级无锁)。
+      SQLiteEventWriter    —— 写入本地 SQLite,方便按 runId/type/createdAt 查询。
       CompositeEventWriter —— 多路写;单个 writer 抛错只记 warning,不影响用户主流程。
   - build_event_writer_from_env 按 AGENTIC_EVENT_LOG* 环境变量装配 writer(默认仅内存)。
   - redact_event / redact_value 复用 memory_policy.SENSITIVE_PATTERN 对 payload 递归脱敏,
@@ -12,8 +13,8 @@
 
 调用关系图:
   MemoryStore(装配时)─▶ build_event_writer_from_env(events) ─▶ Memory / Jsonl / Composite writer
-  MemoryStore.record_event(...) ─▶ writer.write(EventRecord) ─▶ [内存列表 + JSONL(轮转/锁)]
-  下游读取: event_log 读 data/events.jsonl 重建时间线; eval_harness 统计事件指标。
+  MemoryStore.record_event(...) ─▶ writer.write(EventRecord) ─▶ [内存列表 + JSONL / SQLite]
+  下游读取: event_log 读 data/events.jsonl 或 data/events.db 重建时间线; eval_harness 统计事件指标。
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import sqlite3
 import types
 from collections.abc import Iterator
 from dataclasses import replace
@@ -145,6 +147,96 @@ class JsonlEventWriter:
         return self.path.with_name(f"{self.path.name}.{index}")
 
 
+class SQLiteEventWriter:
+    """把事件写入本地 SQLite 数据库。
+
+    SQLite 比 JSONL 更适合“按 runId / type / createdAt 查询”,但仍然是本地学习版后端。
+    这里不改变 EventRecord 的结构,只是把同一份 to_dict() 结果同时保存为:
+        - event_json: 完整事件 JSON,保证未来 reader 可以原样还原。
+        - payload_json: payload 单独列,方便后续调试或迁移。
+
+    注意主键使用 (run_id, id),而不是单独 id。
+    因为当前 MemoryStore 的事件 id 是进程内递增的 event_1/event_2;
+    多个 CLI 进程写同一个 SQLite 文件时,不同 run 里都可能出现 event_1。
+    """
+
+    def __init__(self, path: str | Path) -> None:
+        self.path = Path(path)
+        self._ensure_schema()
+
+    def write(self, event: EventRecord) -> None:
+        event_dict = event.to_dict()
+        payload = event_dict.get("payload")
+        if not isinstance(payload, dict):
+            payload = {"value": payload}
+
+        connection = self._connect()
+        try:
+            with connection:
+                connection.execute(
+                    """
+                    INSERT OR REPLACE INTO events (
+                        run_id,
+                        id,
+                        type,
+                        created_at,
+                        source,
+                        level,
+                        schema_version,
+                        redacted,
+                        payload_json,
+                        event_json
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        event.run_id,
+                        event.id,
+                        event.event_type,
+                        event.created_at,
+                        event.source,
+                        event.level,
+                        event.schema_version,
+                        1 if event.redacted else 0,
+                        json.dumps(payload, ensure_ascii=False, sort_keys=True),
+                        json.dumps(event_dict, ensure_ascii=False, sort_keys=True),
+                    ),
+                )
+        finally:
+            connection.close()
+
+    def _connect(self) -> sqlite3.Connection:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        return sqlite3.connect(self.path)
+
+    def _ensure_schema(self) -> None:
+        connection = self._connect()
+        try:
+            with connection:
+                connection.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS events (
+                        run_id TEXT NOT NULL,
+                        id TEXT NOT NULL,
+                        type TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        source TEXT NOT NULL,
+                        level TEXT NOT NULL,
+                        schema_version INTEGER NOT NULL,
+                        redacted INTEGER NOT NULL,
+                        payload_json TEXT NOT NULL,
+                        event_json TEXT NOT NULL,
+                        PRIMARY KEY (run_id, id)
+                    )
+                    """
+                )
+                connection.execute("CREATE INDEX IF NOT EXISTS idx_events_run_id ON events(run_id)")
+                connection.execute("CREATE INDEX IF NOT EXISTS idx_events_type ON events(type)")
+                connection.execute("CREATE INDEX IF NOT EXISTS idx_events_created_at ON events(created_at)")
+        finally:
+            connection.close()
+
+
 class CompositeEventWriter:
     """把同一条事件写给多个 writer。
 
@@ -207,6 +299,10 @@ def build_event_writer_from_env(events: list[EventRecord]) -> EventWriter:
     开启 JSONL:
         AGENTIC_EVENT_LOG=jsonl
         AGENTIC_EVENT_LOG_PATH=data/events.jsonl
+
+    开启 SQLite:
+        AGENTIC_EVENT_LOG=sqlite
+        AGENTIC_EVENT_LOG_PATH=data/events.db
     """
 
     memory_writer = MemoryEventWriter(events)
@@ -215,6 +311,14 @@ def build_event_writer_from_env(events: list[EventRecord]) -> EventWriter:
     max_bytes = _optional_positive_int(os.getenv("AGENTIC_EVENT_LOG_MAX_BYTES"))
     backup_count = _optional_non_negative_int(os.getenv("AGENTIC_EVENT_LOG_BACKUP_COUNT"), default=3)
     use_lock = _optional_bool(os.getenv("AGENTIC_EVENT_LOG_LOCK"), default=True)
+    if event_log_mode in {"sqlite", "db"}:
+        return CompositeEventWriter(
+            writers=[
+                memory_writer,
+                SQLiteEventWriter(event_log_path or "data/events.db"),
+            ],
+            warning_events=events,
+        )
     if event_log_mode in {"1", "true", "jsonl"} or event_log_path:
         return CompositeEventWriter(
             writers=[

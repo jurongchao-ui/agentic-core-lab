@@ -1,3 +1,18 @@
+"""trace_view — 把一次 run 的结果渲染成人读的过程(排障 UI 层)。
+
+功能:
+  - resolve_trace_mode(default): 读 AGENTIC_TRACE(off/brief/json),非法值回落 default。
+  - format_run_brief(result): 分步可读渲染——记忆决策(llm/回退)、每步动作/工具观察、
+    ResponseDecision 的 tiers/reason、最终回答; 回退时补"原因 + 模型原始输出(截断)"。
+  - format_run_json(result): 完整 JSON(safety/memory/response/trace/memory 全量)。
+  - 纯展示,不改状态; 输入是 Agent.run 返回的 dict。
+
+调用关系图:
+  cli / chat ─▶ resolve_trace_mode() 选模式
+             ─▶ format_run_brief(result) / format_run_json(result) ─▶ 打印
+  数据来源: Agent.run(goal) 的返回 dict(memoryDecision/trace/responseDecision/...)
+"""
+
 from __future__ import annotations
 
 import json

@@ -1,3 +1,22 @@
+"""memory_policy — 判断一句话是否值得进长期记忆(结构化满足 contracts.MemoryPolicy)。
+
+功能:
+  - 不是用户说的每句话都值得记, 且**敏感信息一票否决**(密码/密钥/证件号, 程序侧正则拦, 不靠模型)。
+  - 两个实现共用 evaluate(text) -> MemoryDecision 契约, 装配层用 AGENTIC_MEMORY_POLICY 切换:
+      RuleBasedMemoryPolicy: 纯正则按维度打分(future_relevance/stability/user_preference/…),
+                             正向分达阈值且不敏感才存; 确定性、离线; 也是 LLM 版的兜底。
+      LlmMemoryPolicy:       LLM 语义抽取 + 程序把关(敏感一票否决 + 置信度阈值 + 类型校验),
+                             Ollama 不可用/输出非法时回退规则版; 捕获 rawModelOutput 供排障。
+  - coerce_confidence: 容忍模型把 confidence 写成 null/非数字/0-1 小数, 永不抛异常。
+  - SENSITIVE_PATTERN: 全项目共享的敏感词真相源(tools 守卫、event 脱敏都复用它)。
+
+调用关系图:
+  Agent.run ─▶ MemoryPolicy.evaluate(goal) ─▶ MemoryDecision(save/type/text/scores/…)
+  LlmMemoryPolicy.evaluate ─▶ LlmClient.chat(format_json) ─▶ extract_json_object ─▶ 程序 gate
+                            └─(异常/非法)─▶ RuleBasedMemoryPolicy.evaluate(兜底)
+  MemoryDecision 下游: Agent 决定是否 add_long_term_memory; ResponsePolicy 据 sensitivity_risk 判 local_safety。
+"""
+
 from __future__ import annotations
 
 import json

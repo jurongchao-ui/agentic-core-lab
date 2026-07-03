@@ -1,3 +1,17 @@
+"""ollama_client — 极简 Ollama HTTP 客户端(结构化满足 contracts.LlmClient)。
+
+功能:
+  - chat(messages, format_json): 把 messages POST 到本地 Ollama /api/chat 拿回响应。
+    format_json=True 传 {"format":"json"} 逼模型只吐 JSON(不是安全边界,仍需上层解析校验,
+    但能大幅减少本地小模型输出 markdown/解释文字导致的 fallback)。
+  - 只用标准库 urllib(零第三方依赖); 禁用系统代理; Ollama 不可达时包成 RuntimeError。
+
+调用关系图:
+  HermesPlanner / LlmMemoryPolicy / LlmResponder / LlmSafetyPolicy(各 LLM 组件)
+      └─▶ OllamaClient.chat(messages, format_json) ─▶ Ollama /api/chat
+            (测试里用 FakeClient 替身,同样满足 LlmClient 协议)
+"""
+
 from __future__ import annotations
 
 import json

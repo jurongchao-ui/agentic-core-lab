@@ -1,3 +1,18 @@
+"""chat — 连续对话入口(装配层)。
+
+功能:
+  - 和 cli 的关键区别: 只在启动时创建一次 MemoryStore,多轮输入复用它 —— 这就是
+    "能记住上一轮"的原因。
+  - REPL 循环读用户输入, 每轮跑一次 Agent.run, 按 trace_mode 打印过程/答案。
+  - 兼容 AGENTIC_CHAT_DEBUG=1(等价 AGENTIC_TRACE=json); 两行输入模式缓解终端中文残留。
+
+调用关系图:
+  python -m agentic_core.chat
+      └─▶ build_agent()  —— 一次性装配(同 cli 的组件, 但 MemoryStore 只建一次)
+      └─▶ while True: input() ─▶ Agent.run(goal) ─▶ print_trace(result, mode)
+                                                    (trace_view.format_run_brief/json)
+"""
+
 from __future__ import annotations
 
 import os
@@ -15,6 +30,8 @@ from .memory_policy import LlmMemoryPolicy, RuleBasedMemoryPolicy
 from .ollama_client import OllamaClient
 from .planner import HermesPlanner, RuleBasedPlanner
 from .responder import LlmResponder
+from .runtime_context import build_runtime_identity_from_env
+from .safety_policy import build_safety_policy_from_env
 from .tools import ToolRegistry
 from .trace_view import format_run_brief, format_run_json, resolve_trace_mode
 
@@ -56,6 +73,8 @@ def build_agent() -> Agent:
         memory=memory,
         memory_policy=memory_policy,
         responder=responder,
+        safety_policy=build_safety_policy_from_env(model=model),
+        identity=build_runtime_identity_from_env(),
     )
 
 

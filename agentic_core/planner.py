@@ -1,3 +1,22 @@
+"""planner — 决定下一步 Action(结构化满足 contracts.Planner)。
+
+功能:
+  - RuleBasedPlanner: 纯规则(正则识别算式/待办/笔记/学习计划意图), 确定性、离线;
+    也是 HermesPlanner 的兜底。学习计划会读长期记忆里的时长偏好(如"每次 30 分钟")。
+  - HermesPlanner: LLM 提议一个 action -> 程序当"海关"严格校验(_parse_action:
+    JSON 格式 / 工具名白名单 / 参数齐全 / 是否过早 final)-> 任何不合格就回退 RuleBasedPlanner,
+    并把 rawModelOutput/error 写进 metadata。
+  - 模块级校验/工具函数: validate_tool_input(从 available_tools 派生, 单一真相源)、
+    validate_final_action(防过早收尾)、has_tool/has_successful_tool、build_answer(复用 tool_summary)。
+
+调用关系图:
+  Agent(loop 每一步)
+      └─▶ Planner.next(PlannerContext) ─▶ Action(tool 或 final)
+  HermesPlanner.next ─▶ LlmClient.chat(format_json) ─▶ extract_json_object ─▶ _parse_action(校验)
+                      └─(不合格/异常)─▶ RuleBasedPlanner.next(兜底)
+  build_answer ─▶ summarize_tool_trace (tool_summary)  # 兜底/final 文案
+"""
+
 from __future__ import annotations
 
 import json

@@ -4,6 +4,7 @@ from agentic_core.agent import Agent
 from agentic_core.memory import MemoryStore
 from agentic_core.memory_policy import RuleBasedMemoryPolicy
 from agentic_core.planner import RuleBasedPlanner
+from agentic_core.runtime_context import RuntimeIdentity
 from agentic_core.schemas import (
     Action,
     AgentRunResult,
@@ -52,6 +53,7 @@ def test_agent_run_result_to_dict_keeps_cli_shape() -> None:
         goal="hello",
         status="completed",
         answer="ok",
+        identity=RuntimeIdentity(user_id="u1", tenant_id="t1", roles={"developer"}),
         safety_decision=SafetyDecision(False, "none", ""),
         memory_decision=MemoryDecision(False, "none", "", "test", {}),
         response_decision=FakeResponseDecision(),
@@ -65,6 +67,8 @@ def test_agent_run_result_to_dict_keeps_cli_shape() -> None:
     data = result.to_dict()
 
     assert data["runId"] == "run_1"
+    assert data["identity"]["userId"] == "u1"
+    assert data["identity"]["tenantId"] == "t1"
     assert data["memoryDecision"]["save"] is False
     assert data["safetyDecision"]["category"] == "none"
     assert data["memory"]["longTermMemories"] == []

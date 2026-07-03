@@ -8,12 +8,14 @@ from agentic_core.contracts import (
     Planner,
     Responder,
     ResponsePolicy,
+    SafetyPolicy,
 )
 from agentic_core.memory_policy import LlmMemoryPolicy, RuleBasedMemoryPolicy
 from agentic_core.ollama_client import OllamaClient
 from agentic_core.planner import HermesPlanner, RuleBasedPlanner
 from agentic_core.responder import LlmResponder
 from agentic_core.response_policy import RuleBasedResponsePolicy
+from agentic_core.safety_policy import CompositeSafetyPolicy, LlmSafetyPolicy, RuleBasedSafetyPolicy
 
 
 class FakeClient:
@@ -33,5 +35,8 @@ def test_concrete_impls_satisfy_protocols() -> None:
     assert isinstance(LlmMemoryPolicy(FakeClient()), MemoryPolicy)
     assert isinstance(LlmResponder(FakeClient()), Responder)
     assert isinstance(RuleBasedResponsePolicy(), ResponsePolicy)
+    assert isinstance(RuleBasedSafetyPolicy(), SafetyPolicy)
+    assert isinstance(LlmSafetyPolicy(FakeClient()), SafetyPolicy)
+    assert isinstance(CompositeSafetyPolicy([RuleBasedSafetyPolicy()]), SafetyPolicy)
     assert isinstance(OllamaClient(), LlmClient)
     assert isinstance(FakeClient(), LlmClient)
