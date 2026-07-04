@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from agentic_core.eval_judge import (
+from evalops.judge import (
     EvalJudgeInput,
     JudgeDecision,
     JudgeRubric,

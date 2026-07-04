@@ -3,15 +3,15 @@ from __future__ import annotations
 import json
 import sqlite3
 
-from agentic_core.event_writer import (
+from agentic_core.observability.event_writer import (
     CompositeEventWriter,
     JsonlEventWriter,
     MemoryEventWriter,
     SQLiteEventWriter,
     redact_event,
 )
-from agentic_core.memory import MemoryStore
-from agentic_core.schemas import EventRecord
+from agentic_core.memory.store import MemoryStore
+from agentic_core.runtime.schemas import EventRecord
 
 
 class FakeEventWriter:

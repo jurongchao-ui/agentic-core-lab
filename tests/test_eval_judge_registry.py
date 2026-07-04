@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from agentic_core.eval_judge_registry import (
+from evalops.judge_registry import (
     format_judge_rubrics,
     format_rubric_validation,
     get_judge_rubric,

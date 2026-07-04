@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from agentic_core.eval_history import (
+from evalops.history import (
     append_eval_history,
     format_history_summary,
     main,

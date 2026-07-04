@@ -4,8 +4,8 @@ import json
 
 import pytest
 
-from agentic_core.memory import JsonMemoryStore
-from agentic_core.memory_admin import (
+from agentic_core.memory.store import JsonMemoryStore
+from agentic_core.memory.admin import (
     archive_memory,
     find_memory_conflicts,
     list_memories,
@@ -13,7 +13,7 @@ from agentic_core.memory_admin import (
     resolve_memory_conflict,
     set_memory_importance,
 )
-from agentic_core.schemas import MemoryRecord
+from agentic_core.runtime.schemas import MemoryRecord
 
 
 def test_memory_admin_lists_namespace_memories(tmp_path, capsys) -> None:

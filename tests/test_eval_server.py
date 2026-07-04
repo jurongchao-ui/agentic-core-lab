@@ -3,10 +3,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from agentic_core.auth_tokens import create_signed_token
-from agentic_core.event_writer import MemoryEventWriter
-from agentic_core.eval_server import EvalHttpRequest, EvalServerConfig, handle_eval_request
-from agentic_core.schemas import EventRecord
+from evalops.governance.auth_tokens import create_signed_token
+from agentic_core.observability.event_writer import MemoryEventWriter
+from evalops.governance.server import EvalHttpRequest, EvalServerConfig, handle_eval_request
+from agentic_core.runtime.schemas import EventRecord
 
 
 class BrokenAuditWriter:
@@ -87,7 +87,7 @@ def test_review_status_route_returns_multi_user_state(tmp_path: Path) -> None:
 
 
 def test_review_status_route_reads_sqlite_review_store_when_configured(tmp_path: Path) -> None:
-    from agentic_core.eval_review_store import SQLiteReviewStore
+    from evalops.review_store import SQLiteReviewStore
 
     dataset_path = write_json(tmp_path / "dataset.json", sample_dataset())
     store_path = tmp_path / "reviews.db"
@@ -124,7 +124,7 @@ def test_review_status_route_reads_sqlite_review_store_when_configured(tmp_path:
 
 
 def test_review_decisions_route_returns_paginated_sqlite_decisions(tmp_path: Path) -> None:
-    from agentic_core.eval_review_store import SQLiteReviewStore
+    from evalops.review_store import SQLiteReviewStore
 
     store_path = tmp_path / "reviews.db"
     SQLiteReviewStore(store_path).append_decisions(
@@ -178,7 +178,7 @@ def test_review_decisions_route_returns_paginated_sqlite_decisions(tmp_path: Pat
 
 
 def test_review_decisions_route_parses_query_string_path(tmp_path: Path) -> None:
-    from agentic_core.eval_review_store import SQLiteReviewStore
+    from evalops.review_store import SQLiteReviewStore
 
     store_path = tmp_path / "reviews.db"
     SQLiteReviewStore(store_path).append_decisions(
@@ -218,7 +218,7 @@ def test_review_decisions_route_requires_review_store() -> None:
 
 
 def test_review_decisions_route_rejects_invalid_pagination(tmp_path: Path) -> None:
-    from agentic_core.eval_review_store import SQLiteReviewStore
+    from evalops.review_store import SQLiteReviewStore
 
     store_path = tmp_path / "reviews.db"
     SQLiteReviewStore(store_path)
@@ -705,7 +705,7 @@ def test_review_apply_writes_reviewed_dataset(tmp_path: Path) -> None:
 
 
 def test_review_apply_persists_new_decisions_to_sqlite_review_store(tmp_path: Path) -> None:
-    from agentic_core.eval_review_store import SQLiteReviewStore
+    from evalops.review_store import SQLiteReviewStore
 
     dataset_path = write_json(tmp_path / "dataset.json", sample_dataset())
     output_path = tmp_path / "golden.json"

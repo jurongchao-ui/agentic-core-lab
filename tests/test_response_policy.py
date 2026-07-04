@@ -2,12 +2,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from agentic_core.agent import Agent
-from agentic_core.memory import MemoryStore
-from agentic_core.memory_policy import RuleBasedMemoryPolicy
-from agentic_core.planner import RuleBasedPlanner
-from agentic_core.response_policy import ResponseContext, RuleBasedResponsePolicy
-from agentic_core.schemas import (
+from agentic_core.runtime.agent import Agent
+from agentic_core.memory.store import MemoryStore
+from agentic_core.policies.memory import RuleBasedMemoryPolicy
+from agentic_core.policies.planner import RuleBasedPlanner
+from agentic_core.policies.response import ResponseContext, RuleBasedResponsePolicy
+from agentic_core.runtime.schemas import (
     Action,
     MemoryDecision,
     MemoryRecord,
@@ -16,7 +16,7 @@ from agentic_core.schemas import (
     SafetyDecision,
     TraceStep,
 )
-from agentic_core.tools import ToolRegistry
+from agentic_core.tools.registry import ToolRegistry
 
 
 class StubResponder:

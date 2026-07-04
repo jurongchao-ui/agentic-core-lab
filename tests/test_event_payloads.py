@@ -1,14 +1,14 @@
 from __future__ import annotations
 
-from agentic_core.agent import Agent
-from agentic_core.event_payloads import (
+from agentic_core.runtime.agent import Agent
+from agentic_core.observability.event_payloads import (
     RunStartedPayload,
     validate_event_payload,
 )
-from agentic_core.memory import MemoryStore
-from agentic_core.memory_policy import RuleBasedMemoryPolicy
-from agentic_core.planner import RuleBasedPlanner
-from agentic_core.tools import ToolRegistry
+from agentic_core.memory.store import MemoryStore
+from agentic_core.policies.memory import RuleBasedMemoryPolicy
+from agentic_core.policies.planner import RuleBasedPlanner
+from agentic_core.tools.registry import ToolRegistry
 
 
 def test_typed_event_payload_to_dict_uses_public_json_names() -> None:

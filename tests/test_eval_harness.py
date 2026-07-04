@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from agentic_core.eval_harness import (
+from evalops.harness import (
     EvalCase,
     EvalThresholds,
     collect_run_metrics,
@@ -9,12 +9,12 @@ from agentic_core.eval_harness import (
     run_eval,
     run_eval_case,
 )
-from agentic_core.eval_judge import EvalJudgeInput, JudgeDecision, JudgeRubric, RuleBasedEvalJudge
-from agentic_core.agent import Agent
-from agentic_core.memory import MemoryStore
-from agentic_core.memory_policy import RuleBasedMemoryPolicy
-from agentic_core.planner import RuleBasedPlanner
-from agentic_core.tools import ToolRegistry
+from evalops.judge import EvalJudgeInput, JudgeDecision, JudgeRubric, RuleBasedEvalJudge
+from agentic_core.runtime.agent import Agent
+from agentic_core.memory.store import MemoryStore
+from agentic_core.policies.memory import RuleBasedMemoryPolicy
+from agentic_core.policies.planner import RuleBasedPlanner
+from agentic_core.tools.registry import ToolRegistry
 
 
 def test_default_eval_passes() -> None:

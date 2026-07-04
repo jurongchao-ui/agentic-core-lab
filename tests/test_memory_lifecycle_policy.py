@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from agentic_core.memory import MemoryStore
-from agentic_core.memory_lifecycle import MemoryLifecyclePolicy
-from agentic_core.schemas import MemoryRecord
+from agentic_core.memory.store import MemoryStore
+from agentic_core.memory.lifecycle import MemoryLifecyclePolicy
+from agentic_core.runtime.schemas import MemoryRecord
 
 
 def test_lifecycle_policy_separates_semantic_key_from_conflict_key() -> None:

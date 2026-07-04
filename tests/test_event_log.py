@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 
-from agentic_core.event_log import (
+from agentic_core.observability.event_log import (
     filter_events_by_run_id,
     format_timeline,
     list_run_ids,

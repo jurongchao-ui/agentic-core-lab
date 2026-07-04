@@ -4,8 +4,8 @@ import json
 
 import pytest
 
-from agentic_core.eval_harness import load_eval_cases, main as eval_main, run_eval
-from agentic_core.eval_review import (
+from evalops.harness import load_eval_cases, main as eval_main, run_eval
+from evalops.review import (
     format_review_agreement,
     format_review_state,
     format_review_status,

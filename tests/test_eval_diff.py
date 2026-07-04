@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from agentic_core.eval_diff import diff_eval_reports, format_eval_diff, main
+from evalops.diff import diff_eval_reports, format_eval_diff, main
 
 
 def test_diff_eval_reports_detects_metric_and_case_regressions(tmp_path) -> None:

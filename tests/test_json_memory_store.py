@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from agentic_core.memory import JsonMemoryStore, build_memory_store_from_env
+from agentic_core.memory.store import JsonMemoryStore, build_memory_store_from_env
 
 
 def test_json_memory_store_persists_notes_todos_memories_and_events(tmp_path) -> None:

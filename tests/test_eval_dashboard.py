@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from agentic_core.eval_dashboard import build_dashboard, main, write_dashboard
+from evalops.governance.dashboard import build_dashboard, main, write_dashboard
 
 
 def test_build_dashboard_aggregates_report_history_and_dataset(tmp_path) -> None:

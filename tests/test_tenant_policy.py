@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from agentic_core.tenant_policy import TenantPolicyStore, main
+from evalops.governance.tenant_policy import TenantPolicyStore, main
 
 
 def test_tenant_policy_allows_enabled_tenant_scope(tmp_path, capsys) -> None:

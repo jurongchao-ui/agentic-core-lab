@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from agentic_core.ollama_client import OllamaClient
+from agentic_core.llm.ollama_client import OllamaClient
 
 
 class FakeResponse:

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from agentic_core.memory_policy import LlmMemoryPolicy
+from agentic_core.policies.memory import LlmMemoryPolicy
 
 
 class FakeClient:

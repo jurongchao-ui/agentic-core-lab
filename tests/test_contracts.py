@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from agentic_core.contracts import (
+from agentic_core.runtime.contracts import (
     LlmClient,
     MemoryPolicy,
     Planner,
@@ -10,12 +10,12 @@ from agentic_core.contracts import (
     ResponsePolicy,
     SafetyPolicy,
 )
-from agentic_core.memory_policy import LlmMemoryPolicy, RuleBasedMemoryPolicy
-from agentic_core.ollama_client import OllamaClient
-from agentic_core.planner import HermesPlanner, RuleBasedPlanner
-from agentic_core.responder import LlmResponder
-from agentic_core.response_policy import RuleBasedResponsePolicy
-from agentic_core.safety_policy import CompositeSafetyPolicy, LlmSafetyPolicy, RuleBasedSafetyPolicy
+from agentic_core.policies.memory import LlmMemoryPolicy, RuleBasedMemoryPolicy
+from agentic_core.llm.ollama_client import OllamaClient
+from agentic_core.policies.planner import HermesPlanner, RuleBasedPlanner
+from agentic_core.policies.responder import LlmResponder
+from agentic_core.policies.response import RuleBasedResponsePolicy
+from agentic_core.policies.safety import CompositeSafetyPolicy, LlmSafetyPolicy, RuleBasedSafetyPolicy
 
 
 class FakeClient:

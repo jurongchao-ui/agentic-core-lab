@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from agentic_core.eval_replay import build_replay_bundle, format_replay_bundle, main
+from evalops.replay import build_replay_bundle, format_replay_bundle, main
 
 
 def test_build_replay_bundle_extracts_run_summary() -> None:

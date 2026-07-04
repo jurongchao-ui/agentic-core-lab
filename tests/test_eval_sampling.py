@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from agentic_core.eval_sampling import build_review_queue, format_review_queue, main
+from evalops.sampling import build_review_queue, format_review_queue, main
 
 
 def test_build_review_queue_prioritizes_unreviewed_and_risky_cases() -> None:

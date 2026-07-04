@@ -23,16 +23,16 @@ import json
 import os
 import sys
 
-from .agent import Agent
-from .memory import build_memory_store_from_env
-from .memory_policy import LlmMemoryPolicy, RuleBasedMemoryPolicy
-from .ollama_client import OllamaClient
-from .planner import HermesPlanner, RuleBasedPlanner
-from .responder import LlmResponder
-from .runtime_context import build_runtime_identity_from_env
-from .safety_policy import build_safety_policy_from_env
-from .tools import ToolRegistry
-from .trace_view import format_run_brief, resolve_trace_mode
+from agentic_core.runtime.agent import Agent
+from agentic_core.memory.store import build_memory_store_from_env
+from agentic_core.policies.memory import LlmMemoryPolicy, RuleBasedMemoryPolicy
+from agentic_core.llm.ollama_client import OllamaClient
+from agentic_core.policies.planner import HermesPlanner, RuleBasedPlanner
+from agentic_core.policies.responder import LlmResponder
+from agentic_core.runtime.context import build_runtime_identity_from_env
+from agentic_core.policies.safety import build_safety_policy_from_env
+from agentic_core.tools.registry import ToolRegistry
+from agentic_core.observability.trace_view import format_run_brief, resolve_trace_mode
 
 
 def main() -> int:

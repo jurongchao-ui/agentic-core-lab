@@ -4,8 +4,8 @@ import json
 
 import pytest
 
-from agentic_core.eval_review import review_state
-from agentic_core.eval_review_store import SQLiteReviewStore, main
+from evalops.review import review_state
+from evalops.review_store import SQLiteReviewStore, main
 
 
 def test_sqlite_review_store_appends_and_lists_decisions(tmp_path) -> None:

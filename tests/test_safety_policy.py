@@ -3,8 +3,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from agentic_core.schemas import SafetyDecision
-from agentic_core.safety_policy import (
+from agentic_core.runtime.schemas import SafetyDecision
+from agentic_core.policies.safety import (
     CompositeSafetyPolicy,
     LlmSafetyPolicy,
     RuleBasedSafetyPolicy,

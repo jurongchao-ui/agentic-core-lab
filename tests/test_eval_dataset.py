@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import json
 
-from agentic_core.agent import Agent
-from agentic_core.eval_dataset import build_eval_dataset_from_events
-from agentic_core.eval_harness import load_eval_cases, run_eval
-from agentic_core.memory import MemoryStore
-from agentic_core.memory_policy import RuleBasedMemoryPolicy
-from agentic_core.planner import RuleBasedPlanner
-from agentic_core.tools import ToolRegistry
+from agentic_core.runtime.agent import Agent
+from evalops.dataset import build_eval_dataset_from_events
+from evalops.harness import load_eval_cases, run_eval
+from agentic_core.memory.store import MemoryStore
+from agentic_core.policies.memory import RuleBasedMemoryPolicy
+from agentic_core.policies.planner import RuleBasedPlanner
+from agentic_core.tools.registry import ToolRegistry
 
 
 def test_build_eval_dataset_from_agent_events() -> None:

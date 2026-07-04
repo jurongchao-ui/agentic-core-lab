@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from agentic_core.schemas import Action, Observation, TraceStep
-from agentic_core.tool_summary import summarize_tool_trace
+from agentic_core.runtime.schemas import Action, Observation, TraceStep
+from agentic_core.tools.summary import summarize_tool_trace
 
 
 def test_summarizes_calculator_and_note_success() -> None:

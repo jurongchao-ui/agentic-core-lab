@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from agentic_core.auth_tokens import create_signed_token, main, verify_signed_token
+from evalops.governance.auth_tokens import create_signed_token, main, verify_signed_token
 
 
 def test_signed_token_round_trip() -> None:
