@@ -403,7 +403,7 @@ run_completed
 - 基于事件日志统计行为指标。
 - 对比不同版本 Agent 的行为变化。
 
-当前已落地学习版 `agentic_core.eval_harness`：
+当前已落地学习版 `evalops.harness`：
 
 - 使用规则 planner / memory policy，保证不依赖 Ollama。
 - 内置确定性用例：计算+笔记、长期记忆保存、记忆影响学习计划、安全拒绝、敏感记忆拒绝。

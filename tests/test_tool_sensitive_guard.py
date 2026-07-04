@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import pytest
 
-from agentic_core.memory import MemoryStore
-from agentic_core.memory_policy import RuleBasedMemoryPolicy
-from agentic_core.tools import ToolRegistry
+from agentic_core.memory.store import MemoryStore
+from agentic_core.policies.memory import RuleBasedMemoryPolicy
+from agentic_core.tools.registry import ToolRegistry
 
 
 def build_registry() -> tuple[ToolRegistry, MemoryStore]:

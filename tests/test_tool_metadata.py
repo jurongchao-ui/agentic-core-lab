@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from agentic_core.memory import MemoryStore
-from agentic_core.memory_policy import RuleBasedMemoryPolicy
-from agentic_core.tools import ToolRegistry
+from agentic_core.memory.store import MemoryStore
+from agentic_core.policies.memory import RuleBasedMemoryPolicy
+from agentic_core.tools.registry import ToolRegistry
 
 
 def build_registry() -> ToolRegistry:
@@ -15,6 +15,7 @@ def test_tool_list_exposes_production_metadata() -> None:
     assert calculator["permissionScope"] == "tool:calculator:read"
     assert calculator["timeoutMs"] == 500
     assert calculator["costUnits"] == 1
+    assert calculator["retryCount"] == 0
     assert calculator["riskLevel"] == "low"
     assert calculator["requiresApproval"] is False
     assert calculator["version"] == "1.0"
@@ -39,4 +40,5 @@ def test_custom_tool_gets_default_metadata() -> None:
 
     assert tool["permissionScope"] == "tool:custom.read:read"
     assert tool["timeoutMs"] == 1000
+    assert tool["retryCount"] == 0
     assert tool["sideEffect"] == "read"

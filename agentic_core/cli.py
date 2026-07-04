@@ -1,17 +1,38 @@
+"""cli — 单次运行入口(装配层)。
+
+功能:
+  - 读命令行 goal,按环境变量装配一套组件(依赖注入),跑一次 Agent.run,打印结果。
+  - 组件选择: AGENTIC_PLANNER(hermes/rule)、AGENTIC_MEMORY_POLICY(llm/rule)、
+    AGENTIC_SAFETY_POLICY、AGENTIC_MEMORY_STORE、身份(AGENTIC_USER/TENANT/ROLES/SCOPES)…
+  - 输出详略: AGENTIC_TRACE=off|brief|json(cli 默认 json)。
+
+调用关系图:
+  python -m agentic_core.cli "<goal>"
+      └─▶ main()
+            ├─▶ build_memory_store_from_env / build_safety_policy_from_env /
+            │    build_runtime_identity_from_env / Llm|RuleMemoryPolicy /
+            │    Hermes|RulePlanner / LlmResponder / ToolRegistry   (装配组件)
+            ├─▶ Agent(...).run(goal) ─▶ AgentRunResult(dict)
+            └─▶ trace_view.format_run_brief / json.dumps           (打印)
+  连续对话版见 chat.py(多轮共享同一 MemoryStore)。
+"""
+
 from __future__ import annotations
 
 import json
 import os
 import sys
 
-from .agent import Agent
-from .memory import build_memory_store_from_env
-from .memory_policy import LlmMemoryPolicy, RuleBasedMemoryPolicy
-from .ollama_client import OllamaClient
-from .planner import HermesPlanner, RuleBasedPlanner
-from .responder import LlmResponder
-from .tools import ToolRegistry
-from .trace_view import format_run_brief, resolve_trace_mode
+from agentic_core.runtime.agent import Agent
+from agentic_core.memory.store import build_memory_store_from_env
+from agentic_core.policies.memory import LlmMemoryPolicy, RuleBasedMemoryPolicy
+from agentic_core.llm.ollama_client import OllamaClient
+from agentic_core.policies.planner import HermesPlanner, RuleBasedPlanner
+from agentic_core.policies.responder import LlmResponder
+from agentic_core.runtime.context import build_runtime_identity_from_env
+from agentic_core.policies.safety import build_safety_policy_from_env
+from agentic_core.tools.registry import ToolRegistry
+from agentic_core.observability.trace_view import format_run_brief, resolve_trace_mode
 
 
 def main() -> int:
@@ -68,6 +89,8 @@ def main() -> int:
         memory=memory,
         memory_policy=memory_policy,
         responder=responder,
+        safety_policy=build_safety_policy_from_env(model=model),
+        identity=build_runtime_identity_from_env(),
     )
     result = agent.run(goal)
 

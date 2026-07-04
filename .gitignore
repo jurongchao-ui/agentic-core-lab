@@ -7,5 +7,9 @@ node_modules/
 .venv/
 venv/
 data/*.jsonl
+data/*.db
+data/*.sqlite
+data/*.sqlite3
+data/eval-*.json
 data/memory.json
 data/memory.json.tmp

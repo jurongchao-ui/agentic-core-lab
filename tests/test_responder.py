@@ -2,12 +2,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from agentic_core.agent import Agent
-from agentic_core.memory import MemoryStore
-from agentic_core.memory_policy import RuleBasedMemoryPolicy
-from agentic_core.responder import FALLBACK_REPLY, LlmResponder
-from agentic_core.schemas import Action
-from agentic_core.tools import ToolRegistry
+from agentic_core.runtime.agent import Agent
+from agentic_core.memory.store import MemoryStore
+from agentic_core.policies.memory import RuleBasedMemoryPolicy
+from agentic_core.policies.responder import FALLBACK_REPLY, LlmResponder
+from agentic_core.runtime.schemas import Action
+from agentic_core.tools.registry import ToolRegistry
 
 
 class FakeClient:

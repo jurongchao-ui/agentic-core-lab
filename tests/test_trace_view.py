@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from agentic_core.trace_view import format_run_brief, resolve_trace_mode
+from agentic_core.observability.trace_view import format_run_brief, resolve_trace_mode
 
 
 def test_resolve_trace_mode(monkeypatch) -> None:

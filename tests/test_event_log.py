@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 
-from agentic_core.event_log import (
+from agentic_core.observability.event_log import (
     filter_events_by_run_id,
     format_timeline,
     list_run_ids,
     read_jsonl_events,
+    read_sqlite_events,
 )
 
 
@@ -68,6 +70,82 @@ def test_read_jsonl_events_can_ignore_rotated_backups(tmp_path) -> None:
     events = read_jsonl_events(path, include_backups=False)
 
     assert [event["id"] for event in events] == ["event_2"]
+
+
+def test_read_sqlite_events_returns_empty_list_for_missing_file(tmp_path) -> None:
+    assert read_sqlite_events(tmp_path / "missing.db") == []
+
+
+def test_read_sqlite_events_returns_empty_list_for_missing_table(tmp_path) -> None:
+    path = tmp_path / "events.db"
+    connection = sqlite3.connect(path)
+    connection.close()
+
+    assert read_sqlite_events(path) == []
+
+
+def test_read_sqlite_events_reads_event_json_in_created_order(tmp_path) -> None:
+    path = tmp_path / "events.db"
+    connection = sqlite3.connect(path)
+    try:
+        connection.execute(
+            """
+            CREATE TABLE events (
+                run_id TEXT NOT NULL,
+                id TEXT NOT NULL,
+                type TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                source TEXT NOT NULL,
+                level TEXT NOT NULL,
+                schema_version INTEGER NOT NULL,
+                redacted INTEGER NOT NULL,
+                payload_json TEXT NOT NULL,
+                event_json TEXT NOT NULL,
+                PRIMARY KEY (run_id, id)
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "run_1",
+                "event_2",
+                "run_completed",
+                "2026-07-02T00:00:02+00:00",
+                "agent",
+                "info",
+                1,
+                0,
+                "{}",
+                json.dumps({"id": "event_2", "runId": "run_1", "type": "run_completed"}),
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "run_1",
+                "event_1",
+                "run_started",
+                "2026-07-02T00:00:01+00:00",
+                "agent",
+                "info",
+                1,
+                0,
+                "{}",
+                json.dumps({"id": "event_1", "runId": "run_1", "type": "run_started"}),
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    events = read_sqlite_events(path)
+
+    assert [event["id"] for event in events] == ["event_1", "event_2"]
 
 
 def test_filter_events_by_run_id() -> None:

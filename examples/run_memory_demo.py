@@ -3,11 +3,11 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from agentic_core.agent import Agent
-from agentic_core.memory import MemoryStore
-from agentic_core.memory_policy import RuleBasedMemoryPolicy
-from agentic_core.planner import RuleBasedPlanner
-from agentic_core.tools import ToolRegistry
+from agentic_core.runtime.agent import Agent
+from agentic_core.memory.store import MemoryStore
+from agentic_core.policies.memory import RuleBasedMemoryPolicy
+from agentic_core.policies.planner import RuleBasedPlanner
+from agentic_core.tools.registry import ToolRegistry
 
 
 def run(goal: str) -> None:
