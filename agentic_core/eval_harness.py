@@ -22,10 +22,21 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import Any
 
 from .agent import Agent
+from .eval_judge import (
+    DEFAULT_JUDGE_RUBRIC_NAME,
+    DEFAULT_JUDGE_RUBRIC_VERSION,
+    EvalJudge,
+    EvalJudgeInput,
+    build_eval_judge,
+)
+from .eval_judge_registry import get_judge_rubric
+from .eval_review import require_reviewed_dataset
 from .memory import MemoryStore
 from .memory_policy import RuleBasedMemoryPolicy
 from .planner import RuleBasedPlanner
@@ -53,6 +64,12 @@ class EvalCase:
     expected_response_tiers: list[str] = field(default_factory=list)
     expected_event_counts: dict[str, int] = field(default_factory=dict)
     expected_memory_contains: list[str] = field(default_factory=list)
+    judge_rubric: str = DEFAULT_JUDGE_RUBRIC_NAME
+    judge_rubric_version: str = DEFAULT_JUDGE_RUBRIC_VERSION
+    expected_judge_score: int | None = None
+    expected_judge_passed: bool | None = None
+    judge_score_tolerance: int = 10
+    judge_notes: str = ""
 
 
 @dataclass
@@ -69,6 +86,7 @@ class EvalCaseResult:
     memory_texts: list[str]
     event_counts: dict[str, int]
     metrics: dict[str, int | float]
+    judge: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -194,13 +212,17 @@ DEFAULT_EVAL_CASES = [
 ]
 
 
-def run_eval(cases: list[EvalCase] | None = None, thresholds: EvalThresholds | None = None) -> EvalReport:
+def run_eval(
+    cases: list[EvalCase] | None = None,
+    thresholds: EvalThresholds | None = None,
+    judge: EvalJudge | None = None,
+) -> EvalReport:
     """运行 eval 用例并返回结构化报告。
 
     使用规则 planner/policy,保证本地确定性,不依赖 Ollama。
     """
 
-    results = [run_eval_case(case) for case in (cases or DEFAULT_EVAL_CASES)]
+    results = [run_eval_case(case, judge=judge) for case in (cases or DEFAULT_EVAL_CASES)]
     passed = sum(1 for result in results if result.passed)
     metrics = _aggregate_metrics(results)
     event_counts = _aggregate_event_counts(results)
@@ -218,7 +240,22 @@ def run_eval(cases: list[EvalCase] | None = None, thresholds: EvalThresholds | N
     )
 
 
-def run_eval_case(case: EvalCase) -> EvalCaseResult:
+def load_eval_cases(path: str | Path) -> list[EvalCase]:
+    """从 JSON dataset 加载 EvalCase。
+
+    支持两种形状:
+      1. {"cases": [...]}: eval_dataset.py 生成的 dataset。
+      2. [...]: 直接的 case 列表,方便手写小文件。
+    """
+
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    raw_cases = data.get("cases") if isinstance(data, dict) else data
+    if not isinstance(raw_cases, list):
+        raise ValueError("eval dataset must contain a cases list")
+    return [_eval_case_from_dict(item) for item in raw_cases]
+
+
+def run_eval_case(case: EvalCase, judge: EvalJudge | None = None) -> EvalCaseResult:
     memory = MemoryStore()
     policy = RuleBasedMemoryPolicy()
     agent = Agent(
@@ -235,6 +272,18 @@ def run_eval_case(case: EvalCase) -> EvalCaseResult:
     result = agent.run_typed(case.goal)
     failures = _check_expectations(case, result)
     metrics = collect_run_metrics(result)
+    judge_data: dict[str, Any] | None = None
+    if judge is not None:
+        judge_decision = judge.judge(_build_judge_input(case, result, failures))
+        judge_data = judge_decision.to_dict()
+        if not judge_decision.passed:
+            failures = [*failures, f"judge failed: {judge_decision.reason}"]
+        rubric_failures = _check_judge_rubric(case, judge_decision)
+        if rubric_failures:
+            failures = [*failures, *rubric_failures]
+        calibration_failures = _check_judge_calibration(case, judge_decision.score, judge_decision.passed)
+        if calibration_failures:
+            failures = [*failures, *calibration_failures]
     return EvalCaseResult(
         name=case.name,
         passed=not failures,
@@ -246,6 +295,44 @@ def run_eval_case(case: EvalCase) -> EvalCaseResult:
         memory_texts=[memory.text for memory in result.memory_snapshot.long_term_memories],
         event_counts=_event_counts(result),
         metrics=metrics,
+        judge=judge_data,
+    )
+
+
+def _eval_case_from_dict(data: Any) -> EvalCase:
+    item = data if isinstance(data, dict) else {}
+    return EvalCase(
+        name=str(item.get("name", "")),
+        goal=str(item.get("goal", "")),
+        setup_goals=_string_list(_first_present(item, "setupGoals", "setup_goals")),
+        expected_status=str(_first_present(item, "expectedStatus", "expected_status", default="completed")),
+        expected_tools=_string_list(_first_present(item, "expectedTools", "expected_tools")),
+        expected_answer_contains=_string_list(
+            _first_present(item, "expectedAnswerContains", "expected_answer_contains")
+        ),
+        expected_memory_saves=_optional_int(
+            _first_present(item, "expectedMemorySaves", "expected_memory_saves")
+        ),
+        expected_safety_refusal=_optional_bool(
+            _first_present(item, "expectedSafetyRefusal", "expected_safety_refusal")
+        ),
+        expected_tool_failures=_optional_int(
+            _first_present(item, "expectedToolFailures", "expected_tool_failures")
+        ),
+        expected_response_tiers=_string_list(_first_present(item, "expectedResponseTiers", "expected_response_tiers")),
+        expected_event_counts=_int_dict(_first_present(item, "expectedEventCounts", "expected_event_counts")),
+        expected_memory_contains=_string_list(_first_present(item, "expectedMemoryContains", "expected_memory_contains")),
+        judge_rubric=str(_first_present(item, "judgeRubric", "judge_rubric", default=DEFAULT_JUDGE_RUBRIC_NAME)),
+        judge_rubric_version=str(
+            _first_present(item, "judgeRubricVersion", "judge_rubric_version", default=DEFAULT_JUDGE_RUBRIC_VERSION)
+        ),
+        expected_judge_score=_optional_int(_first_present(item, "expectedJudgeScore", "expected_judge_score")),
+        expected_judge_passed=_optional_bool(_first_present(item, "expectedJudgePassed", "expected_judge_passed")),
+        judge_score_tolerance=_optional_int(
+            _first_present(item, "judgeScoreTolerance", "judge_score_tolerance", default=10)
+        )
+        or 10,
+        judge_notes=str(_first_present(item, "judgeNotes", "judge_notes", default="")),
     )
 
 
@@ -296,9 +383,12 @@ def format_eval_report(report: EvalReport) -> str:
     lines.append("Cases:")
     for case in report.cases:
         mark = "PASS" if case.passed else "FAIL"
+        judge_text = ""
+        if case.judge is not None:
+            judge_text = f", judge={case.judge['score']}:{'PASS' if case.judge['passed'] else 'FAIL'}"
         lines.append(
             f"- {mark} {case.name}: status={case.status}, tools={case.tool_names}, "
-            f"tiers={case.response_tiers}"
+            f"tiers={case.response_tiers}{judge_text}"
         )
         for failure in case.failures:
             lines.append(f"  - {failure}")
@@ -367,6 +457,74 @@ def _check_expectations(case: EvalCase, result: AgentRunResult) -> list[str]:
     return failures
 
 
+def _build_judge_input(
+    case: EvalCase,
+    result: AgentRunResult,
+    deterministic_failures: list[str],
+) -> EvalJudgeInput:
+    return EvalJudgeInput(
+        case_name=case.name,
+        goal=case.goal,
+        expected_status=case.expected_status,
+        expected_tools=list(case.expected_tools),
+        expected_answer_contains=list(case.expected_answer_contains),
+        expected_response_tiers=list(case.expected_response_tiers),
+        answer=result.answer,
+        status=result.status,
+        tool_names=_tool_names(result),
+        response_tiers=list(result.response_decision.tiers),
+        deterministic_failures=list(deterministic_failures),
+        judge_rubric=case.judge_rubric,
+        judge_rubric_version=case.judge_rubric_version,
+        expected_judge_score=case.expected_judge_score,
+        expected_judge_passed=case.expected_judge_passed,
+        judge_notes=case.judge_notes,
+    )
+
+
+def _check_judge_calibration(
+    case: EvalCase,
+    actual_score: int,
+    actual_passed: bool,
+) -> list[str]:
+    """把 judge 输出和人工 label 比对。
+
+    这是本地校准的最小闭环: golden dataset 里可以写人工期望分数/通过状态,
+    judge 偏离过大时让 eval 失败,避免 judge 版本漂移而没人发现。
+    """
+
+    failures: list[str] = []
+    if case.expected_judge_passed is not None and actual_passed != case.expected_judge_passed:
+        failures.append(
+            f"judge label mismatch: expected passed={case.expected_judge_passed}, got {actual_passed}"
+        )
+    if case.expected_judge_score is not None:
+        delta = abs(actual_score - case.expected_judge_score)
+        if delta > case.judge_score_tolerance:
+            failures.append(
+                "judge score drift: "
+                f"expected {case.expected_judge_score}±{case.judge_score_tolerance}, got {actual_score}"
+            )
+    return failures
+
+
+def _check_judge_rubric(case: EvalCase, judge_decision: Any) -> list[str]:
+    metadata = judge_decision.metadata if hasattr(judge_decision, "metadata") else {}
+    rubric_data = metadata.get("rubric") if isinstance(metadata, dict) else None
+    if not isinstance(rubric_data, dict):
+        return []
+    actual_name = str(rubric_data.get("name", ""))
+    actual_version = str(rubric_data.get("version", ""))
+    if actual_name and case.judge_rubric and actual_name != case.judge_rubric:
+        return [f"judge rubric mismatch: expected {case.judge_rubric}, got {actual_name}"]
+    if actual_version and case.judge_rubric_version and actual_version != case.judge_rubric_version:
+        return [
+            "judge rubric version mismatch: "
+            f"expected {case.judge_rubric_version}, got {actual_version}"
+        ]
+    return []
+
+
 def _tool_names(result: AgentRunResult) -> list[str]:
     return [step.action.tool_name or "" for step in result.trace if step.action.tool_name]
 
@@ -383,6 +541,8 @@ def _aggregate_metrics(results: list[EvalCaseResult]) -> dict[str, int | float]:
     total_tool_successes = sum(int(result.metrics["tool_successes"]) for result in results)
     total_steps = sum(int(result.metrics["steps"]) for result in results)
     passed_cases = sum(1 for result in results if result.passed)
+    judged_cases = [result for result in results if result.judge is not None]
+    passed_judges = sum(1 for result in judged_cases if result.judge and result.judge["passed"])
     return {
         "case_pass_rate": passed_cases / len(results) if results else 1.0,
         "tool_calls": total_tool_calls,
@@ -394,6 +554,9 @@ def _aggregate_metrics(results: list[EvalCaseResult]) -> dict[str, int | float]:
         "memory_decisions": sum(int(result.metrics["memory_decisions"]) for result in results),
         "run_failed": sum(int(result.metrics["run_failed"]) for result in results),
         "avg_steps": total_steps / len(results) if results else 0.0,
+        "judge_evaluated": len(judged_cases),
+        "judge_passed": passed_judges,
+        "judge_pass_rate": passed_judges / len(judged_cases) if judged_cases else 1.0,
     }
 
 
@@ -428,12 +591,87 @@ def _check_thresholds(metrics: dict[str, int | float], thresholds: EvalThreshold
     return failures
 
 
-def main() -> int:
+def _string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value]
+
+
+def _first_present(item: dict[str, Any], *keys: str, default: Any = None) -> Any:
+    for key in keys:
+        if key in item:
+            return item[key]
+    return default
+
+
+def _optional_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _optional_bool(value: Any) -> bool | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "y"}:
+            return True
+        if normalized in {"false", "0", "no", "n"}:
+            return False
+    return bool(value)
+
+
+def _int_dict(value: Any) -> dict[str, int]:
+    if not isinstance(value, dict):
+        return {}
+    output: dict[str, int] = {}
+    for key, item in value.items():
+        try:
+            output[str(key)] = int(item)
+        except (TypeError, ValueError):
+            continue
+    return output
+
+
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run deterministic evals for Agentic Core Lab")
     parser.add_argument("--json", action="store_true", help="输出 JSON 报告")
-    args = parser.parse_args()
+    parser.add_argument("--cases", help="从 JSON dataset 加载 eval cases")
+    parser.add_argument("--require-reviewed", action="store_true", help="要求 dataset cases 已审核")
+    parser.add_argument(
+        "--judge",
+        choices=["off", "rule", "llm"],
+        default="off",
+        help="启用回答质量 judge: off/rule/llm",
+    )
+    parser.add_argument(
+        "--judge-model",
+        default=os.environ.get("AGENTIC_MODEL", "openhermes:latest"),
+        help="LLM judge 使用的 Ollama 模型,默认读取 AGENTIC_MODEL 或 openhermes:latest",
+    )
+    parser.add_argument(
+        "--judge-rubric",
+        default=os.environ.get("AGENTIC_JUDGE_RUBRIC", DEFAULT_JUDGE_RUBRIC_NAME),
+        help="judge rubric 名称,默认 AGENTIC_JUDGE_RUBRIC 或 agentic_core_default",
+    )
+    parser.add_argument(
+        "--judge-rubric-version",
+        default=os.environ.get("AGENTIC_JUDGE_RUBRIC_VERSION", "v1"),
+        help="judge rubric 版本,默认 AGENTIC_JUDGE_RUBRIC_VERSION 或 v1",
+    )
+    args = parser.parse_args(argv)
 
-    report = run_eval()
+    if args.cases and args.require_reviewed:
+        require_reviewed_dataset(args.cases)
+    cases = load_eval_cases(args.cases) if args.cases else None
+    rubric = get_judge_rubric(args.judge_rubric, args.judge_rubric_version)
+    report = run_eval(cases, judge=build_eval_judge(args.judge, model=args.judge_model, rubric=rubric))
     if args.json:
         print(json.dumps(report.to_dict(), ensure_ascii=False, indent=2))
     else:

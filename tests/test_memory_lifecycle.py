@@ -4,6 +4,7 @@ from agentic_core.agent import Agent
 from agentic_core.memory import JsonMemoryStore, MemoryStore
 from agentic_core.memory_policy import RuleBasedMemoryPolicy
 from agentic_core.planner import RuleBasedPlanner
+from agentic_core.runtime_context import RuntimeIdentity
 from agentic_core.tools import ToolRegistry
 
 
@@ -18,6 +19,43 @@ def test_memory_store_deduplicates_exact_long_term_memories() -> None:
     assert memory.long_term_memories[0].reason == "first"
     assert memory.long_term_memories[0].updated_at is not None
     assert memory.long_term_memories[0].importance >= 0
+
+
+def test_long_term_memories_are_namespaced_by_user_and_tenant() -> None:
+    memory = MemoryStore()
+
+    user_a = memory.add_long_term_memory(
+        "preference",
+        "用户偏好: 每次 30 分钟",
+        "a",
+        {},
+        user_id="user_a",
+        tenant_id="tenant_a",
+    )
+    user_b = memory.add_long_term_memory(
+        "preference",
+        "用户偏好: 每次 30 分钟",
+        "b",
+        {},
+        user_id="user_b",
+        tenant_id="tenant_a",
+    )
+    tenant_b = memory.add_long_term_memory(
+        "preference",
+        "用户偏好: 每次 30 分钟",
+        "tenant b",
+        {},
+        user_id="user_a",
+        tenant_id="tenant_b",
+    )
+
+    assert len(memory.long_term_memories) == 3
+    assert user_a.user_id == "user_a"
+    assert user_b.user_id == "user_b"
+    assert tenant_b.tenant_id == "tenant_b"
+    assert memory.snapshot(user_id="user_a", tenant_id="tenant_a").long_term_memories == [user_a]
+    assert memory.snapshot(user_id="user_b", tenant_id="tenant_a").long_term_memories == [user_b]
+    assert memory.snapshot(user_id="user_a", tenant_id="tenant_b").long_term_memories == [tenant_b]
 
 
 def test_json_memory_store_keeps_deduplicated_memory_after_reload(tmp_path) -> None:
@@ -47,6 +85,32 @@ def test_agent_repeated_preference_does_not_duplicate_long_term_memory() -> None
     agent.run("以后安排学习任务时，每次控制在30分钟以内")
 
     assert len(memory.long_term_memories) == 1
+
+
+def test_agent_saves_and_reads_long_term_memory_in_identity_namespace() -> None:
+    memory = MemoryStore()
+    policy = RuleBasedMemoryPolicy()
+    agent_a = Agent(
+        planner=RuleBasedPlanner(),
+        tools=ToolRegistry(memory, policy),
+        memory=memory,
+        memory_policy=policy,
+        identity=RuntimeIdentity(user_id="user_a", tenant_id="tenant_a"),
+    )
+    agent_b = Agent(
+        planner=RuleBasedPlanner(),
+        tools=ToolRegistry(memory, policy),
+        memory=memory,
+        memory_policy=policy,
+        identity=RuntimeIdentity(user_id="user_b", tenant_id="tenant_a"),
+    )
+
+    agent_a.run("以后安排学习任务时，每次控制在30分钟以内")
+    result_b = agent_b.run("帮我安排 agentic memory 的学习计划")
+
+    assert memory.long_term_memories[0].user_id == "user_a"
+    assert memory.long_term_memories[0].tenant_id == "tenant_a"
+    assert result_b["memory"]["longTermMemories"] == []
 
 
 def test_archive_long_term_memory_excludes_it_from_snapshot() -> None:

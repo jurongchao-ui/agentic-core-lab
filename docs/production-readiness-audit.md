@@ -24,7 +24,7 @@
 当前门禁状态:
 
 ```text
-pytest: 152 passed
+pytest: 275 passed
 mypy: success
 compileall: passed
 eval harness: 8/8 passed, Gate PASS
@@ -41,11 +41,12 @@ eval harness: 8/8 passed, Gate PASS
 
 但它还不是完整生产系统:
 
-- 已有学习版 `RuntimeIdentity` 身份上下文,但没有真实登录/JWT/租户策略中心。
+- 已有学习版 `RuntimeIdentity` 身份上下文、本地 signed claims token 和 tenant policy JSON,但没有真实登录/OIDC/JWT provider/集中式租户策略服务。
 - 事件日志已有本地 SQLite 后端,但还没有服务端数据库级事件平台和记忆后端。
 - 没有外部 moderation、人审队列和策略中心。
 - 没有 embedding/向量记忆。
-- 没有线上 replay/人工标注 eval 数据集。
+- 已有本地 replay inspection bundle、人工标注数据流和带可选 Bearer Token / review 写入 API / review decisions 分页 API / SQLite review store / JSONL 审计事件的 eval governance server,但没有线上协作标注平台。
+- 已有本地 HTML/JSON eval governance dashboard、标准库服务端认证、signed claims token、tenant policy JSON、写入/RBAC/review state 边界,但没有真实身份系统、集中式租户策略服务和多人协作的生产治理后台。
 
 ## 阶段 1: Typed State
 
@@ -64,6 +65,10 @@ eval harness: 8/8 passed, Gate PASS
   - `TraceStep`
   - `AgentRunState`
   - `AgentRunResult`
+- `agentic_core/event_payloads.py`
+  - typed event payload dataclass
+  - event payload required-field schema registry
+  - payload validation result
 - `agentic_core/agent.py`
   - `Agent.run_typed() -> AgentRunResult`
   - `Agent.run() -> dict` 兼容旧 CLI/Chat
@@ -76,17 +81,19 @@ eval harness: 8/8 passed, Gate PASS
 - 内部主链路不再依赖裸 dict。
 - 对外 JSON 保持兼容字段,例如 `runId`、`memoryDecision`、`longTermMemories`。
 - Safety/Memory/Trace/Event/Result 都有 typed 外壳。
+- Agent 主链路事件 payload 使用 typed dataclass。
+- `MemoryStore.record_event()` 会写入 `payloadSchema.valid/errors` 校验结果。
 
 仍未等同完整生产:
 
 - 未引入 Pydantic / attrs / msgspec 等运行时 schema 校验库。
-- Event payload 仍是 `dict[str, Any]`,没有按事件类型拆成独立 payload schema。
+- Event payload 已有学习版 required-field schema,但还不是强运行时 schema。
 - 没有 schema migration 工具。
 
 建议后续:
 
-- 如果继续生产化,优先给 `EventRecord.payload` 做事件类型级 schema。
-- 再考虑从 dataclass 迁移到 Pydantic v2 或 msgspec。
+- 给 `EventRecord.payload` 增加 schema migration。
+- 再考虑从 dataclass + required-field 校验迁移到 Pydantic v2 或 msgspec。
 
 ## 阶段 2: SafetyPolicy
 
@@ -232,8 +239,13 @@ eval harness: 8/8 passed, Gate PASS
   - timeline formatter
 - `agentic_core/memory.py`
   - `record_event()`
+- `agentic_core/event_payloads.py`
+  - payload schema registry
+  - typed payload dataclass
+  - payload validation
 - `tests/test_event_writer.py`
 - `tests/test_event_log.py`
+- `tests/test_event_payloads.py`
 - `docs/persistent-event-log-production-plan.md`
 
 已满足:
@@ -245,12 +257,13 @@ eval harness: 8/8 passed, Gate PASS
 - SQLite 支持本地结构化查询,按 `(run_id, id)` 避免跨 run 事件 id 冲突。
 - reader 默认读取轮转备份。
 - run 生命周期事件基本完整。
+- 核心事件 payload 写入前有 `payloadSchema` 校验证据。
 
 仍未等同完整生产:
 
 - JSONL/SQLite 仍是本地后端,不是 Postgres/ClickHouse/OTel 这类集中式事件平台。
 - 多机并发不适用。
-- Event payload 没有强 schema。
+- Event payload schema 仍是标准库 required-field 版本,不是 Pydantic/msgspec 强校验。
 - 还没有 deterministic replay,只有 timeline inspection。
 
 建议后续:
@@ -273,15 +286,32 @@ eval harness: 8/8 passed, Gate PASS
   - archive expired
   - prune by retention
   - JSON persistence
+- `agentic_core/memory_lifecycle.py`
+  - single lifecycle policy source
+  - semantic key
+  - conflict key
+  - importance
+  - default expiry
+  - retention sort key
+- `agentic_core/memory_admin.py`
+  - namespace list
+  - archive
+  - set-importance
+  - conflicts
+  - resolve-conflict
 - `agentic_core/schemas.py`
   - MemoryRecord lifecycle fields
 - `tests/test_memory_lifecycle.py`
+- `tests/test_memory_lifecycle_policy.py`
 - `tests/test_json_memory_store.py`
 - `docs/architecture.md`
 
 已满足:
 
 - active/archived 状态。
+- MemoryStore 和 memory_admin 共用 `MemoryLifecyclePolicy`,避免去重/冲突/importance/过期规则漂移。
+- 长期记忆带 userId/tenantId namespace,Agent 保存和读取 snapshot 时按当前 RuntimeIdentity 隔离。
+- memory_admin 可按 namespace 查看、归档、调整 importance、查看 active 冲突组并解决冲突。
 - 访问统计。
 - 技术栈和学习时长偏好的规则语义合并。
 - 重要性评分。
@@ -292,19 +322,18 @@ eval harness: 8/8 passed, Gate PASS
 仍未等同完整生产:
 
 - 没有 embedding/向量检索。
-- 没有 memory review UI。
-- 没有 per-user/per-tenant namespace。
-- 没有 memory conflict resolution 策略。
+- 没有图形化 memory review UI。
+- 语义合并和冲突检测仍是规则版,尚未接入 embedding/人工审核工作流。
+- 生命周期策略仍在代码内,尚未外部化成租户级策略配置。
 
 建议后续:
 
-- 增加 namespace/user id 字段。
 - 增加向量检索后端。
-- 增加人工审核与 memory edit/delete 接口。
+- 将本地 memory_admin 升级为服务端审核 UI/API。
 
 ## 阶段 7: Evals
 
-状态: **完成确定性质量门禁基线。**
+状态: **完成确定性质量门禁基线 + judge 骨架 + judge registry/version 治理 + 本地人工 label 校准 + 复核队列采样 + 多人一致性统计。**
 
 证据:
 
@@ -314,7 +343,70 @@ eval harness: 8/8 passed, Gate PASS
   - `EvalReport`
   - `EvalThresholds`
   - `collect_run_metrics`
+- `agentic_core/eval_dataset.py`
+  - event-log-to-eval dataset draft
+  - JSONL/SQLite event reader integration
+  - reviewRequired dataset schema
+- `agentic_core/eval_replay.py`
+  - replay inspection bundle
+  - JSONL/SQLite event reader integration
+  - timeline / tool calls / event counts extraction
+- `agentic_core/eval_dashboard.py`
+  - HTML/JSON governance dashboard
+  - report/history/dataset aggregation
+  - review queue/agreement/rubric validation summary
+- `agentic_core/eval_server.py`
+  - 标准库 governance server
+  - 可选 Bearer Token 认证
+  - signed claims token 验证
+  - tenant policy JSON 授权
+  - admin/viewer/reviewer scope RBAC
+  - `/api/reviews/status` 多用户审核状态
+  - 受保护的 `POST /api/reviews/apply`
+  - review 写入路径由服务端配置,请求体不能指定路径
+  - `eval_review_apply` / `eval_review_apply_failed` 审计事件
+  - `/health`
+  - `/dashboard`
+  - `/api/dashboard`
+  - `/api/rubrics`
+- `agentic_core/eval_review.py`
+  - dataset review list/apply
+  - approve/reject case decisions
+  - judge 人工 label 写入
+  - 多人复核 agreement 统计
+  - `--require-reviewed` integration through eval_harness
+- `agentic_core/eval_sampling.py`
+  - review queue 生成
+  - priority/reason 采样
+  - `agentic_eval_review_queue` JSON 输出
+- `agentic_core/eval_diff.py`
+  - eval report JSON diff
+  - metric/case/gate regression detection
+  - `--fail-on-regression`
+- `agentic_core/eval_history.py`
+  - append-only eval history JSONL
+  - trend summary
+  - latest-vs-previous regression hints
+- `agentic_core/eval_judge.py`
+  - `EvalJudgeInput`
+  - `JudgeDecision`
+  - `RuleBasedEvalJudge`
+  - `LlmEvalJudge`
+- `agentic_core/eval_judge_registry.py`
+  - judge rubric registry
+  - dataset rubric validation
+  - CLI list/validate
 - `tests/test_eval_harness.py`
+- `tests/test_eval_dataset.py`
+- `tests/test_eval_replay.py`
+- `tests/test_eval_dashboard.py`
+- `tests/test_eval_server.py`
+- `tests/test_eval_review.py`
+- `tests/test_eval_diff.py`
+- `tests/test_eval_history.py`
+- `tests/test_eval_judge.py`
+- `tests/test_eval_judge_registry.py`
+- `tests/test_eval_sampling.py`
 - `docs/evals.md`
 
 已满足:
@@ -324,32 +416,61 @@ eval harness: 8/8 passed, Gate PASS
 - 支持 JSON 报告。
 - 支持 gate failures。
 - 可统计 event counts、tool success rate、planner fallback、memory saved、run failed。
+- 可从 JSONL/SQLite event log 生成待审核 eval dataset 草稿。
+- 可按 runId 生成 replay inspection bundle,用于本地复盘和人工复核。
+- 可生成本地 HTML/JSON eval governance dashboard。
+- 可启动标准库 eval governance server,暴露 health、HTML dashboard、JSON dashboard 和 judge rubric registry。
+- governance server 支持 admin/viewer/reviewer Bearer Token;开启后除 `/health` 外都需要 `Authorization: Bearer ...`。
+- governance server 支持本地 signed claims token,通过 HMAC 验证 `sub/tenant/scopes/exp`,scope 从 token claims 读取。
+- governance server 支持 tenant policy JSON,启用后 tenant 必须存在、启用,并允许当前请求所需 scope。
+- `eval.viewer` 允许读取 dashboard/API;`eval.reviewer` 允许 `POST /api/reviews/apply`。
+- governance server 支持 `GET /api/reviews/status`,输出每个 case 的 reviewer、review session、currentStatus、conflicts 和 latestDecision。
+- governance server 支持 `GET /api/reviews/decisions`,可按 case/reviewer/session 分页查询 SQLite review decisions。
+- governance server 支持 `POST /api/reviews/apply`,复用 `eval_review.review_dataset()` 写出 golden dataset。
+- 写入 API 必须配置 token、`--dataset` 和 `--review-output`,并拒绝客户端传文件路径。
+- 写入 API 可通过 `--review-store` 或 `AGENTIC_EVAL_SERVER_REVIEW_STORE` 把新增 review decisions 写入 SQLite;状态查询启用该配置后从 SQLite 汇总多人审核状态。
+- 写入 API 可通过 `--audit-events` 或 `AGENTIC_EVAL_SERVER_AUDIT_EVENTS` 输出 JSONL 审计事件。
+- 审计事件写入失败不会阻断 review apply 主流程。
+- governance server 对未支持的非 GET 路由返回 `405` 和 `Allow: GET`。
+- 可从 dataset 生成按优先级排序的本地复核队列。
+- 可批准/拒绝 dataset case,输出带 reviewer/notes 的 golden dataset。
+- 可基于 `reviewDecisions` 统计 status/judge label 冲突和 conflict rate。
+- `eval_harness --cases` 可加载 dataset 回归。
+- `eval_harness --require-reviewed` 可阻止未审核草稿进入回归。
+- `eval_diff` 可对比两次 JSON 报告,识别 gate/metric/case 回归。
+- `eval_history` 可把 eval report 追加写入 JSONL 历史,并输出趋势摘要。
+- `eval_harness --judge rule` 可启用离线确定性回答质量裁判。
+- `eval_harness --judge llm` 可启用 Ollama LLM-as-judge,模型异常时回退 rule judge。
+- `eval_judge_registry` 可登记并校验 `judgeRubric` / `judgeRubricVersion`。
+- eval 启用 judge 时会校验当前 judge rubric 是否匹配 case 期望。
+- eval report 汇总 `judge_evaluated`、`judge_passed`、`judge_pass_rate`,便于趋势监控。
+- dataset case 可携带 `judgeRubric`、`expectedJudgeScore`、`expectedJudgePassed`、`judgeScoreTolerance`、`judgeNotes`。
+- 启用 judge 后会检查人工 label mismatch 和 score drift,形成本地校准闭环。
 
 仍未等同完整生产:
 
-- 没有真实线上数据回放。
-- 没有人工标注集。
-- 没有 LLM-as-judge。
-- 没有跨版本报告对比。
-- 没有按 event log 自动生成 eval cases。
+- 已有本地 replay inspection bundle、静态 governance dashboard 和带可选认证/signed claims token/tenant policy JSON/SQLite review store/写入审计边界的 governance server,但没有真实线上回放平台。
+- 本地审核、复核队列、多人一致性统计和 judge label 已有,但没有协作式人工标注平台。
+- 已有 LLM-as-judge 接口骨架、本地 label 校准、本地 registry/version 校验、静态 dashboard、本地 scope RBAC、signed claims token、tenant policy JSON、review state 和最小受保护写入 API,但没有真实身份系统、集中式租户策略服务和跨团队标注一致性看板。
+- eval history 仍是本地 JSONL,还没有服务端趋势存储和可视化平台。
+- event-log-to-eval 仍是本地草稿生成,还没有采样策略和多人审批工作流。
 
 建议后续:
 
-- 增加 event-log-to-eval 工具。
-- 增加 golden dataset 文件格式。
-- 增加 JSON 报告 diff。
+- 增加协作式 golden dataset 标注平台。
+- 增加 eval 报告可视化和服务端趋势存储。
 
 ## 七阶段完成度
 
 | 阶段 | 当前状态 | 证据强度 | 完整生产缺口 |
 | --- | --- | --- | --- |
-| Typed State | 已完成学习版 | 强 | payload schema / migration |
+| Typed State | 已完成学习版 + payload schema | 强 | schema migration / Pydantic/msgspec |
 | SafetyPolicy | 生产化骨架 | 强 | 外部 moderation / 人审 |
 | Tool Metadata | 已接入治理 | 强 | JSON Schema / owner / SLA |
 | Middleware Pipeline | 生产化学习版 | 强 | OTel / 跨进程 budget / 持久幂等 |
-| Persistent Event Log | 本地 JSONL + SQLite 后端 | 强 | Postgres / ClickHouse / OTel / deterministic replay |
-| Memory Lifecycle | 规则版治理 | 强 | embedding / namespace / conflict resolution |
-| Evals | 确定性 gate | 强 | 线上回放 / 标注集 / judge |
+| Persistent Event Log | 本地 JSONL + SQLite + payloadSchema | 强 | Postgres / ClickHouse / OTel / deterministic replay |
+| Memory Lifecycle | `MemoryLifecyclePolicy` 单一策略源 + user/tenant namespace + memory_admin CLI + conflict resolution | 强 | embedding / review UI/API / 外部化租户级策略 |
+| Evals | 确定性 gate + dashboard + 带本地 RBAC、signed claims token、tenant policy JSON、review state、review decisions 分页 API、review 写入 API、SQLite review store 和审计事件的 governance server + replay bundle + dataset review + review queue + agreement + judge registry + judge label 校准 + report diff + history + judge 骨架 | 强 | 线上回放平台 / 协作标注平台 / OIDC/JWT provider 与集中式策略中心 |
 
 ## 结论
 
@@ -357,7 +478,7 @@ eval harness: 8/8 passed, Gate PASS
 
 但如果把目标定义为“真实公司生产环境可直接上线”,还需要继续补:
 
-1. 真实用户/租户认证授权系统(JWT/session/策略中心)。
+1. 真实用户/租户认证授权系统(OIDC/JWT provider/session/集中式策略中心;当前只到本地静态 token + signed claims token + tenant policy JSON + scope RBAC)。
 2. 数据库后端(Postgres/SQLite/ClickHouse/OTel)。
 3. 外部 moderation + human review。
 4. embedding memory 后端。

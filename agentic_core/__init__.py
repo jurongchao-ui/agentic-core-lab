@@ -21,10 +21,14 @@
 
 __all__ = [
     "agent",
+    "auth_tokens",
     "memory",
+    "memory_admin",
+    "memory_lifecycle",
     "memory_policy",
     "ollama_client",
     "planner",
     "schemas",
+    "tenant_policy",
     "tools",
 ]

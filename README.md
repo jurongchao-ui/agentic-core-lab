@@ -51,6 +51,63 @@ python3 -m agentic_core.eval_harness
 python3 -m agentic_core.eval_harness --json
 ```
 
+审核/维护长期记忆:
+
+```bash
+python3 -m agentic_core.memory_admin list --path data/memory.json --user-id local_user --tenant-id default_tenant
+python3 -m agentic_core.memory_admin archive --path data/memory.json --memory-id memory_1 --reason "人工审核归档"
+python3 -m agentic_core.memory_admin set-importance --path data/memory.json --memory-id memory_1 --importance 80
+python3 -m agentic_core.memory_admin conflicts --path data/memory.json --user-id local_user --tenant-id default_tenant
+python3 -m agentic_core.memory_admin resolve-conflict --path data/memory.json --keep-memory-id memory_2 --reason "保留最新长期记忆"
+```
+
+启动只读本地 eval 治理服务:
+
+```bash
+python3 -m agentic_core.eval_server \
+  --report data/eval-current.json \
+  --history data/eval-history.jsonl \
+  --dataset data/eval-golden.json \
+  --review-output data/eval-golden-reviewed.json \
+  --review-store data/reviews.db \
+  --audit-events data/eval-server-audit.jsonl \
+  --port 8765
+```
+
+可选开启 Bearer Token:
+
+```bash
+AGENTIC_EVAL_SERVER_TOKEN=local-secret \
+python3 -m agentic_core.eval_server \
+  --dataset data/eval-dataset.json \
+  --review-output data/eval-golden.json \
+  --review-store data/reviews.db \
+  --audit-events data/eval-server-audit.jsonl
+```
+
+也可以拆分只读和审核 token:
+
+```bash
+AGENTIC_EVAL_SERVER_VIEWER_TOKEN=view-secret \
+AGENTIC_EVAL_SERVER_REVIEWER_TOKEN=review-secret \
+python3 -m agentic_core.eval_server --dataset data/eval-dataset.json --review-output data/eval-golden.json --review-store data/reviews.db
+```
+
+也可以使用本地 signed claims token:
+
+```bash
+python3 -m agentic_core.auth_tokens create \
+  --secret local-signing-secret \
+  --subject reviewer_1 \
+  --tenant default_tenant \
+  --scopes eval.viewer,eval.reviewer \
+  --ttl 3600
+
+AGENTIC_EVAL_SERVER_SIGNING_SECRET=local-signing-secret \
+AGENTIC_EVAL_SERVER_TENANT_POLICY=data/tenant-policy.json \
+python3 -m agentic_core.eval_server --dataset data/eval-dataset.json --review-output data/eval-golden.json --review-store data/reviews.db
+```
+
 ## 文档导航
 
 - [Tutorial](docs/tutorial.md): 从 CLI/chat、记忆持久化、事件日志到 eval 的实操教程。
@@ -69,20 +126,21 @@ python3 -m agentic_core.eval_harness --json
 - Typed State 主链路,`Agent.run_typed()` 返回 `AgentRunResult`。
 - CLI 单轮运行和 Chat 连续对话。
 - 规则版与 LLM 版 MemoryPolicy,敏感信息一票否决。
-- Memory Lifecycle: active/archived、访问统计、重要性、过期归档、规则语义合并。
+- Memory Lifecycle: `MemoryLifecyclePolicy` 单一策略源、active/archived、user/tenant namespace、memory_admin 审核维护 CLI、冲突检测/解决、访问统计、重要性、过期归档、规则语义合并。
 - JSON 记忆持久化。
 - RuleBased / LLM / Composite SafetyPolicy。
 - ResponsePolicy 最终回复仲裁。
 - RuntimeIdentity: user/tenant/roles/permission scopes 学习版身份上下文。
 - ToolSpec 治理元数据 + ToolGovernancePolicy。
 - MiddlewarePipeline: approval、cost、timeout、retry、idempotency、tracing metadata。
+- Event payload schema: typed payload dataclass + 写入前 payloadSchema 校验。
 - EventWriter 抽象 + JSONL/SQLite 持久事件日志、脱敏、轮转、文件锁、备份读取。
-- Eval Harness: 8 个确定性用例、指标、事件计数和质量门禁。
+- Eval Harness: 8 个确定性用例、本地治理 dashboard、带 viewer/reviewer RBAC、signed claims token、tenant policy JSON、本地静态 token、受保护 review 写入 API、review status API、review decisions 分页 API、SQLite review store 和 JSONL 审计事件的 governance server、replay inspection bundle、dataset 审核、复核队列采样、多人复核状态/一致性统计、judge registry/version 治理、judge 人工 label 校准、event-log-to-eval 草稿、报告 diff、历史趋势、rule/LLM judge、指标、事件计数和质量门禁。
 
 ## 当前验收状态
 
 ```text
-pytest: 152 passed
+pytest: 275 passed
 mypy: success
 compileall: passed
 eval harness: 8/8 passed, Gate PASS

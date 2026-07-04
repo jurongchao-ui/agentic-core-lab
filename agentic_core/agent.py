@@ -36,6 +36,23 @@ from .contracts import (
     ResponsePolicy,
     SafetyPolicy,
 )
+from .event_payloads import (
+    EventPayloadInput,
+    MemoryClarificationPayload,
+    MemoryDecisionPayload,
+    MemorySavedPayload,
+    PlannerActionPayload,
+    PlannerFallbackPayload,
+    PlannerSkippedPayload,
+    ResponseDecisionPayload,
+    RunCompletedPayload,
+    RunFailedPayload,
+    RunStartedPayload,
+    SafetyDecisionPayload,
+    SafetyRefusalPayload,
+    ToolObservationPayload,
+    ToolStartedPayload,
+)
 from .memory import MemoryStore, now_iso
 from .middleware import MiddlewarePipeline, ToolCallContext
 from .response_policy import ResponseContext, ResponseDecision, RuleBasedResponsePolicy
@@ -110,7 +127,7 @@ class Agent:
             started_at=now_iso(),
             identity=self.identity,
         )
-        self._record_event(state, "run_started", {"goal": goal, "identity": self.identity.to_dict()})
+        self._record_event(state, "run_started", RunStartedPayload(goal=goal, identity=self.identity.to_dict()))
         safety_decision = SafetyDecision(refuse=False, category="none", reason="not checked")
         memory_decision: MemoryDecision | None = None
         try:
@@ -141,7 +158,7 @@ class Agent:
         self._record_event(
             state,
             "safety_decision",
-            {"safety": safety_decision.to_dict()},
+            SafetyDecisionPayload(safety=safety_decision.to_dict()),
         )
         if safety_decision.refuse:
             response_decision = self._decide_response(
@@ -156,10 +173,10 @@ class Agent:
             self._record_event(
                 state,
                 "safety_refusal",
-                {
-                    "safety": safety_decision.to_dict(),
-                    "answer": response_decision.text,
-                },
+                SafetyRefusalPayload(
+                    safety=safety_decision.to_dict(),
+                    answer=response_decision.text,
+                ),
             )
             return self._build_result(
                 state=state,
@@ -175,7 +192,7 @@ class Agent:
         self._record_event(
             state,
             "memory_decision",
-            {"decision": memory_decision.to_dict(), "savedMemory": None},
+            MemoryDecisionPayload(decision=memory_decision.to_dict(), saved_memory=None),
         )
 
         if memory_decision.needs_clarification:
@@ -191,11 +208,11 @@ class Agent:
             self._record_event(
                 state,
                 "memory_clarification",
-                {
-                    "decision": memory_decision.to_dict(),
-                    "responseDecision": response_decision.to_dict(),
-                    "answer": response_decision.text,
-                },
+                MemoryClarificationPayload(
+                    decision=memory_decision.to_dict(),
+                    response_decision=response_decision.to_dict(),
+                    answer=response_decision.text,
+                ),
             )
             return self._build_result(
                 state=state,
@@ -213,12 +230,14 @@ class Agent:
                 text=memory_decision.text,
                 reason=memory_decision.reason,
                 scores=memory_decision.scores,
+                user_id=self.identity.user_id,
+                tenant_id=self.identity.tenant_id,
             )
             state.saved_memories.append(saved_memory)
             self._record_event(
                 state,
                 "memory_saved",
-                {"savedMemory": saved_memory.to_dict()},
+                MemorySavedPayload(saved_memory=saved_memory.to_dict()),
             )
 
         if self._should_skip_planner(goal, memory_decision, state.saved_memories):
@@ -234,18 +253,18 @@ class Agent:
             self._record_event(
                 state,
                 "planner_skipped",
-                {
-                    "reason": "No tool intent detected; response can be resolved by ResponsePolicy/responder.",
-                    "responseDecision": response_decision.to_dict(),
-                },
+                PlannerSkippedPayload(
+                    reason="No tool intent detected; response can be resolved by ResponsePolicy/responder.",
+                    response_decision=response_decision.to_dict(),
+                ),
             )
             self._record_event(
                 state,
                 "response_decision",
-                {
-                    "answer": response_decision.text,
-                    "responseDecision": response_decision.to_dict(),
-                },
+                ResponseDecisionPayload(
+                    answer=response_decision.text,
+                    response_decision=response_decision.to_dict(),
+                ),
             )
             return self._build_result(
                 state=state,
@@ -263,25 +282,25 @@ class Agent:
                 goal=goal,
                 step=step,
                 trace=state.trace,
-                memory_snapshot=self.memory.snapshot(touch_long_term=True),
+                memory_snapshot=self._memory_snapshot(touch_long_term=True),
                 available_tools=self.tools.list(),
             )
             action = self.planner.next(context)
             self._record_event(
                 state,
                 "planner_action",
-                {"step": step, "action": action.to_dict()},
+                PlannerActionPayload(step=step, action=action.to_dict()),
             )
             if action.source == "rule_fallback":
                 self._record_event(
                     state,
                     "planner_fallback",
-                    {
-                        "step": step,
-                        "action": action.to_dict(),
-                        "reason": action.reason,
-                        "metadata": action.metadata,
-                    },
+                    PlannerFallbackPayload(
+                        step=step,
+                        action=action.to_dict(),
+                        reason=action.reason,
+                        metadata=action.metadata,
+                    ),
                 )
 
             if action.type == "final":
@@ -298,10 +317,10 @@ class Agent:
                 self._record_event(
                     state,
                     "response_decision",
-                    {
-                        "answer": response_decision.text,
-                        "responseDecision": response_decision.to_dict(),
-                    },
+                    ResponseDecisionPayload(
+                        answer=response_decision.text,
+                        response_decision=response_decision.to_dict(),
+                    ),
                 )
                 return self._build_result(
                     state=state,
@@ -316,7 +335,7 @@ class Agent:
             self._record_event(
                 state,
                 "tool_started",
-                {"step": step, "action": action.to_dict()},
+                ToolStartedPayload(step=step, action=action.to_dict()),
             )
             observation = self._execute_action(state, action, started_at)
             trace_step = TraceStep(
@@ -333,11 +352,11 @@ class Agent:
             self._record_event(
                 state,
                 "tool_observation",
-                {
-                    "step": step,
-                    "action": action.to_dict(),
-                    "observation": observation.to_dict(),
-                },
+                ToolObservationPayload(
+                    step=step,
+                    action=action.to_dict(),
+                    observation=observation.to_dict(),
+                ),
             )
 
         incomplete_reason = f"达到最大步数 {self.max_steps},任务未能自动完成。"
@@ -353,11 +372,11 @@ class Agent:
         self._record_event(
             state,
             "response_decision",
-            {
-                "answer": response_decision.text,
-                "responseDecision": response_decision.to_dict(),
-                "incompleteReason": incomplete_reason,
-            },
+            ResponseDecisionPayload(
+                answer=response_decision.text,
+                response_decision=response_decision.to_dict(),
+                incomplete_reason=incomplete_reason,
+            ),
         )
         return self._build_result(
             state=state,
@@ -388,10 +407,17 @@ class Agent:
                 trace=trace,
                 planner_answer=planner_answer,
                 incomplete_reason=incomplete_reason,
-                memory_snapshot=self.memory.snapshot(),
+                memory_snapshot=self._memory_snapshot(),
                 responder=self.responder,
                 safety_decision=safety_decision,
             )
+        )
+
+    def _memory_snapshot(self, touch_long_term: bool = False) -> Any:
+        return self.memory.snapshot(
+            touch_long_term=touch_long_term,
+            user_id=self.identity.user_id,
+            tenant_id=self.identity.tenant_id,
         )
 
     def _execute_action(self, state: AgentRunState, action: Action, started_at: float) -> Observation:
@@ -463,7 +489,7 @@ class Agent:
         self,
         state: AgentRunState,
         event_type: str,
-        payload: dict[str, Any],
+        payload: EventPayloadInput,
         level: str = "info",
     ) -> None:
         event = self.memory.record_event(
@@ -487,7 +513,7 @@ class Agent:
         self._record_event(
             state,
             "run_completed",
-            {"status": status, "answer": answer, "identity": state.identity.to_dict()},
+            RunCompletedPayload(status=status, answer=answer, identity=state.identity.to_dict()),
         )
         return AgentRunResult(
             run_id=state.run_id,
@@ -499,7 +525,7 @@ class Agent:
             memory_decision=memory_decision,
             response_decision=response_decision,
             trace=list(state.trace),
-            memory_snapshot=self.memory.snapshot(),
+            memory_snapshot=self._memory_snapshot(),
             events=list(state.events),
             started_at=state.started_at,
             completed_at=now_iso(),
@@ -529,12 +555,12 @@ class Agent:
         self._record_event(
             state,
             "run_failed",
-            {
-                "error": str(error),
-                "errorType": error.__class__.__name__,
-                "goal": goal,
-                "identity": state.identity.to_dict(),
-            },
+            RunFailedPayload(
+                error=str(error),
+                error_type=error.__class__.__name__,
+                goal=goal,
+                identity=state.identity.to_dict(),
+            ),
             level="error",
         )
         return AgentRunResult(
@@ -547,7 +573,7 @@ class Agent:
             memory_decision=memory_decision,
             response_decision=response_decision,
             trace=list(state.trace),
-            memory_snapshot=self.memory.snapshot(),
+            memory_snapshot=self._memory_snapshot(),
             events=list(state.events),
             started_at=state.started_at,
             completed_at=now_iso(),

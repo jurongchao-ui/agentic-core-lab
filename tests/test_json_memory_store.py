@@ -55,6 +55,8 @@ def test_json_memory_store_writes_stable_schema(tmp_path) -> None:
     assert "importance" in data["long_term_memories"][0]
     assert "expiresAt" in data["long_term_memories"][0]
     assert data["long_term_memories"][0]["mergedFrom"] == []
+    assert data["long_term_memories"][0]["userId"] == "local_user"
+    assert data["long_term_memories"][0]["tenantId"] == "default_tenant"
 
 
 def test_json_memory_store_persists_memory_lifecycle_fields(tmp_path) -> None:
@@ -129,6 +131,8 @@ def test_json_memory_store_loads_old_memory_without_lifecycle_fields(tmp_path) -
     assert memory.long_term_memories[0].status == "active"
     assert memory.long_term_memories[0].importance == 0
     assert memory.long_term_memories[0].merged_from == []
+    assert memory.long_term_memories[0].user_id == "local_user"
+    assert memory.long_term_memories[0].tenant_id == "default_tenant"
     assert memory.snapshot().long_term_memories[0].text == "用户偏好: 每次 30 分钟"
 
 

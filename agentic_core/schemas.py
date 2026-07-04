@@ -6,7 +6,7 @@
   - 决策类: Action(planner 输出) / Observation(工具结果) / MemoryDecision(记忆策略) /
     SafetyDecision(安全策略) / ResponseDecision(见 response_policy)。
   - 记录类: NoteRecord / TodoRecord / MemoryRecord(带 status/importance/expiresAt 生命周期) /
-    EventRecord(id/type/runId/payload/source/level/schemaVersion/redacted)。
+    EventRecord(id/type/runId/payload/source/level/schemaVersion/redacted/payloadSchema)。
   - 运行态: TraceStep(一步 action+observation) / AgentRunState(运行中可变状态) /
     AgentRunResult(一次 run 的完整强类型结果)。
   - 枚举: ActionType / RunStatus / EventType / MemoryType / MemoryStatus。
@@ -44,6 +44,8 @@ EventType = Literal[
     "response_decision",
     "run_completed",
     "run_failed",
+    "eval_review_apply",
+    "eval_review_apply_failed",
 ]
 MemoryType = Literal["none", "preference", "user_profile", "task_state", "long_term_note"]
 MemoryStatus = Literal["active", "archived"]
@@ -287,6 +289,8 @@ class MemoryRecord:
     importance: int = 0
     expires_at: str | None = None
     merged_from: list[str] = field(default_factory=list)
+    user_id: str = "local_user"
+    tenant_id: str = "default_tenant"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -320,6 +324,10 @@ class MemoryRecord:
             "expiresAt": self.expires_at,
             # 被语义合并进当前记忆的历史文本快照。
             "mergedFrom": list(self.merged_from),
+            # 记忆所属用户,用于多用户隔离。
+            "userId": self.user_id,
+            # 记忆所属租户,用于多租户隔离。
+            "tenantId": self.tenant_id,
         }
 
 
@@ -329,7 +337,7 @@ class EventRecord:
 
     payload 仍允许是 dict[str, Any],因为事件内容会随阶段变化。
     关键是事件本身的外壳固定:
-    id/type/run_id/created_at/payload/schema_version/source/level/redacted。
+    id/type/run_id/created_at/payload/schema_version/source/level/redacted/payload_schema。
     """
 
     id: str
@@ -341,6 +349,9 @@ class EventRecord:
     level: str = "info"
     schema_version: int = 1
     redacted: bool = False
+    payload_schema_version: int = 1
+    payload_schema_valid: bool = True
+    payload_schema_errors: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         data = {
@@ -366,6 +377,14 @@ class EventRecord:
         if isinstance(self.payload, dict):
             # 兼容旧 recentEvents 里把业务字段平铺在事件顶层的显示方式。
             data.update(_to_jsonable(self.payload))
+        data["payloadSchema"] = {
+            # EventRecord 外壳 schema 和 payload schema 分开演进。
+            "version": self.payload_schema_version,
+            # 当前 payload 是否满足该 event type 的 required 字段。
+            "valid": self.payload_schema_valid,
+            # 校验错误列表。为空表示通过。
+            "errors": list(self.payload_schema_errors),
+        }
         return data
 
 

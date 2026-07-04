@@ -2,7 +2,7 @@
 
 功能:
   - MemoryStore(进程内存版): 笔记/待办/长期记忆/事件的读写; snapshot() 给 planner/responder 只读快照。
-  - 长期记忆生命周期: 精确 + 规则语义去重(_memory_semantic_key)、active/archived 状态、
+  - 长期记忆生命周期: 精确 + MemoryLifecyclePolicy 语义去重、active/archived 状态、
     访问统计(touch)、importance、expiresAt 过期归档、retention 数量上限裁剪。
   - 事件: record_event 构造 EventRecord 并交给 EventWriter(内存/JSONL/SQLite);
     写盘前用 redact_event 复用 SENSITIVE_PATTERN 脱敏。
@@ -20,11 +20,18 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from .event_writer import EventWriter, build_event_writer_from_env, redact_event
+from .event_payloads import EventPayloadInput, payload_to_dict, validate_event_payload
+from .memory_lifecycle import (
+    DEFAULT_MEMORY_LIFECYCLE_POLICY,
+    MemoryLifecyclePolicy,
+    clamp_int,
+    parse_iso,
+)
 from .schemas import EventRecord, MemoryRecord, MemorySnapshot, MemoryStatus, NoteRecord, TodoRecord
 
 
@@ -46,7 +53,17 @@ class MemoryStore:
         先看懂 MemoryStore 的职责,再把底层存储换成 SQLite/Markdown/Obsidian。
     """
 
-    def __init__(self, event_writer: EventWriter | None = None) -> None:
+    def __init__(
+        self,
+        event_writer: EventWriter | None = None,
+        default_user_id: str = "local_user",
+        default_tenant_id: str = "default_tenant",
+        lifecycle_policy: MemoryLifecyclePolicy | None = None,
+    ) -> None:
+        self.default_user_id = default_user_id
+        self.default_tenant_id = default_tenant_id
+        self.lifecycle_policy = lifecycle_policy or DEFAULT_MEMORY_LIFECYCLE_POLICY
+
         # 普通学习笔记,由 note.add 工具写入。
         self.notes: list[NoteRecord] = []
 
@@ -95,19 +112,33 @@ class MemoryStore:
         text: str,
         reason: str,
         scores: dict[str, int],
+        user_id: str | None = None,
+        tenant_id: str | None = None,
     ) -> MemoryRecord:
         """新增一条长期记忆。
 
         精确重复的长期记忆直接返回已有记录,避免用户多次表达同一偏好时不断膨胀。
         规则能识别的同主题记忆会做语义合并,例如“用户技术栈”后续更新时只保留一条 active 记忆。
         """
+        user_id = user_id or self.default_user_id
+        tenant_id = tenant_id or self.default_tenant_id
         scores_data = dict(scores)
-        existing = self.find_long_term_memory(memory_type=memory_type, text=text)
+        existing = self.find_long_term_memory(
+            memory_type=memory_type,
+            text=text,
+            user_id=user_id,
+            tenant_id=tenant_id,
+        )
         if existing:
             existing.updated_at = now_iso()
-            existing.importance = max(existing.importance, _memory_importance(memory_type, scores_data))
+            existing.importance = max(existing.importance, self.lifecycle_policy.memory_importance(memory_type, scores_data))
             return existing
-        semantic_match = self.find_semantic_long_term_memory(memory_type=memory_type, text=text)
+        semantic_match = self.find_semantic_long_term_memory(
+            memory_type=memory_type,
+            text=text,
+            user_id=user_id,
+            tenant_id=tenant_id,
+        )
         if semantic_match:
             now = now_iso()
             if semantic_match.text not in semantic_match.merged_from:
@@ -117,9 +148,9 @@ class MemoryStore:
             semantic_match.scores = scores_data
             semantic_match.importance = max(
                 semantic_match.importance,
-                _memory_importance(memory_type, scores_data),
+                self.lifecycle_policy.memory_importance(memory_type, scores_data),
             )
-            semantic_match.expires_at = _default_memory_expiry(memory_type, now)
+            semantic_match.expires_at = self.lifecycle_policy.default_expiry(memory_type, now)
             semantic_match.updated_at = now
             return semantic_match
         created_at = now_iso()
@@ -131,49 +162,81 @@ class MemoryStore:
             scores=scores_data,
             created_at=created_at,
             updated_at=created_at,
-            importance=_memory_importance(memory_type, scores_data),
-            expires_at=_default_memory_expiry(memory_type, created_at),
+            importance=self.lifecycle_policy.memory_importance(memory_type, scores_data),
+            expires_at=self.lifecycle_policy.default_expiry(memory_type, created_at),
+            user_id=user_id,
+            tenant_id=tenant_id,
         )
         self.long_term_memories.append(memory)
         return memory
 
-    def find_long_term_memory(self, memory_type: str, text: str) -> MemoryRecord | None:
+    def find_long_term_memory(
+        self,
+        memory_type: str,
+        text: str,
+        user_id: str | None = None,
+        tenant_id: str | None = None,
+    ) -> MemoryRecord | None:
         """查找同类型、同正文的长期记忆。"""
 
-        normalized_text = _normalize_memory_text(text)
+        user_id = user_id or self.default_user_id
+        tenant_id = tenant_id or self.default_tenant_id
+        normalized_text = self.lifecycle_policy.normalize_text(text)
         for memory in self.long_term_memories:
+            if not _memory_in_namespace(memory, user_id, tenant_id):
+                continue
             if memory.status != "active":
                 continue
             if memory.memory_type != memory_type:
                 continue
-            if _normalize_memory_text(memory.text) == normalized_text:
+            if self.lifecycle_policy.normalize_text(memory.text) == normalized_text:
                 return memory
         return None
 
-    def find_semantic_long_term_memory(self, memory_type: str, text: str) -> MemoryRecord | None:
+    def find_semantic_long_term_memory(
+        self,
+        memory_type: str,
+        text: str,
+        user_id: str | None = None,
+        tenant_id: str | None = None,
+    ) -> MemoryRecord | None:
         """查找同类型、同主题的 active 长期记忆。
 
         这是学习版语义合并:先用可解释规则识别少量高价值主题。
-        生产里可以把 `_memory_semantic_key` 替换成 embedding/向量检索或数据库唯一键。
+        生产里可以把 `MemoryLifecyclePolicy.semantic_key()` 替换成 embedding/向量检索或数据库唯一键。
         """
 
-        semantic_key = _memory_semantic_key(memory_type, text)
+        semantic_key = self.lifecycle_policy.semantic_key(memory_type, text)
         if semantic_key is None:
             return None
+        user_id = user_id or self.default_user_id
+        tenant_id = tenant_id or self.default_tenant_id
         for memory in self.long_term_memories:
+            if not _memory_in_namespace(memory, user_id, tenant_id):
+                continue
             if memory.status != "active":
                 continue
             if memory.memory_type != memory_type:
                 continue
-            if _memory_semantic_key(memory.memory_type, memory.text) == semantic_key:
+            if self.lifecycle_policy.semantic_key(memory.memory_type, memory.text) == semantic_key:
                 return memory
         return None
 
-    def list_active_long_term_memories(self) -> list[MemoryRecord]:
+    def list_active_long_term_memories(
+        self,
+        user_id: str | None = None,
+        tenant_id: str | None = None,
+    ) -> list[MemoryRecord]:
         """返回仍会影响 planner 的 active 长期记忆。"""
 
         self.archive_expired_long_term_memories()
-        return [memory for memory in self.long_term_memories if memory.status == "active"]
+        user_id = user_id or self.default_user_id
+        tenant_id = tenant_id or self.default_tenant_id
+        return [
+            memory
+            for memory in self.long_term_memories
+            if memory.status == "active" and _memory_in_namespace(memory, user_id, tenant_id)
+        ]
 
     def archive_expired_long_term_memories(self, now: str | None = None) -> list[MemoryRecord]:
         """归档已经过期的长期记忆。
@@ -183,11 +246,11 @@ class MemoryStore:
         """
 
         archived: list[MemoryRecord] = []
-        now_value = _parse_iso(now or now_iso())
+        now_value = parse_iso(now or now_iso())
         for memory in self.long_term_memories:
             if memory.status != "active":
                 continue
-            if not _is_memory_expired(memory, now_value):
+            if not self.lifecycle_policy.is_expired(memory, now_value):
                 continue
             archived.append(self.archive_long_term_memory(memory.id, "expired"))
         return archived
@@ -205,7 +268,7 @@ class MemoryStore:
         active_memories = self.list_active_long_term_memories()
         if len(active_memories) <= max_active:
             return []
-        active_memories.sort(key=_memory_retention_sort_key, reverse=True)
+        active_memories.sort(key=self.lifecycle_policy.retention_sort_key, reverse=True)
         keep_ids = {memory.id for memory in active_memories[:max_active]}
         archived: list[MemoryRecord] = []
         for memory in active_memories[max_active:]:
@@ -241,7 +304,7 @@ class MemoryStore:
         """手动调整长期记忆重要性,方便后续人工审核或 eval 调参。"""
 
         memory = self._get_long_term_memory(memory_id)
-        memory.importance = _clamp_int(importance, 0, 100)
+        memory.importance = clamp_int(importance, 0, 100)
         memory.updated_at = now_iso()
         return memory
 
@@ -256,7 +319,7 @@ class MemoryStore:
         event: dict[str, Any] | None = None,
         event_type: str | None = None,
         run_id: str | None = None,
-        payload: dict[str, Any] | None = None,
+        payload: EventPayloadInput | None = None,
         source: str | None = None,
         level: str = "info",
     ) -> EventRecord:
@@ -270,24 +333,33 @@ class MemoryStore:
         run_id = run_id or str(data.pop("runId", "unknown"))
         source = source or str(data.pop("source", _infer_event_source(event_type)))
         level = str(data.pop("level", level))
-        payload = payload if payload is not None else data
+        payload_data = payload_to_dict(payload if payload is not None else data)
+        payload_validation = validate_event_payload(event_type, payload_data)
         self._event_count += 1
         record = EventRecord(
             id=f"event_{self._event_count}",
             event_type=event_type,
             run_id=run_id,
-            payload=payload,
+            payload=payload_data,
             created_at=now_iso(),
             source=source,
             level=level,
+            payload_schema_version=payload_validation.schema_version,
+            payload_schema_valid=payload_validation.valid,
+            payload_schema_errors=list(payload_validation.errors),
         )
         record = redact_event(record)
         self.event_writer.write(record)
         return record
 
-    def snapshot(self, touch_long_term: bool = False) -> MemorySnapshot:
+    def snapshot(
+        self,
+        touch_long_term: bool = False,
+        user_id: str | None = None,
+        tenant_id: str | None = None,
+    ) -> MemorySnapshot:
         """返回当前记忆快照,用于打印和传给 planner。"""
-        active_memories = self.list_active_long_term_memories()
+        active_memories = self.list_active_long_term_memories(user_id=user_id, tenant_id=tenant_id)
         if touch_long_term:
             active_memories = [self.touch_long_term_memory(memory.id) for memory in active_memories]
         return MemorySnapshot(
@@ -305,9 +377,14 @@ class JsonMemoryStore(MemoryStore):
     这样核心业务代码不用知道底层到底是内存还是文件。
     """
 
-    def __init__(self, path: str | Path = "data/memory.json", event_writer: EventWriter | None = None) -> None:
+    def __init__(
+        self,
+        path: str | Path = "data/memory.json",
+        event_writer: EventWriter | None = None,
+        lifecycle_policy: MemoryLifecyclePolicy | None = None,
+    ) -> None:
         self.path = Path(path)
-        super().__init__(event_writer=event_writer)
+        super().__init__(event_writer=event_writer, lifecycle_policy=lifecycle_policy)
         self.load()
 
     def load(self) -> None:
@@ -364,8 +441,17 @@ class JsonMemoryStore(MemoryStore):
         text: str,
         reason: str,
         scores: dict[str, int],
+        user_id: str | None = None,
+        tenant_id: str | None = None,
     ) -> MemoryRecord:
-        memory = super().add_long_term_memory(memory_type, text, reason, scores)
+        memory = super().add_long_term_memory(
+            memory_type,
+            text,
+            reason,
+            scores,
+            user_id=user_id,
+            tenant_id=tenant_id,
+        )
         self.save()
         return memory
 
@@ -401,7 +487,7 @@ class JsonMemoryStore(MemoryStore):
         event: dict[str, Any] | None = None,
         event_type: str | None = None,
         run_id: str | None = None,
-        payload: dict[str, Any] | None = None,
+        payload: EventPayloadInput | None = None,
         source: str | None = None,
         level: str = "info",
     ) -> EventRecord:
@@ -448,12 +534,6 @@ def _infer_event_source(event_type: str) -> str:
     if event_type.startswith("planner_"):
         return "planner"
     return "agent"
-
-
-def _normalize_memory_text(text: str) -> str:
-    """用于精确去重的轻量规范化。"""
-
-    return " ".join(text.strip().split())
 
 
 def _list_data(data: dict[str, Any], *keys: str) -> list[Any]:
@@ -505,6 +585,8 @@ def _memory_from_dict(data: Any) -> MemoryRecord:
         importance=_optional_int(item.get("importance"), default=0),
         expires_at=_optional_str(item.get("expiresAt") or item.get("expires_at")),
         merged_from=_string_list(item.get("mergedFrom") or item.get("merged_from")),
+        user_id=str(item.get("userId") or item.get("user_id") or "local_user"),
+        tenant_id=str(item.get("tenantId") or item.get("tenant_id") or "default_tenant"),
     )
 
 
@@ -521,7 +603,31 @@ def _event_from_dict(data: Any) -> EventRecord:
         level=str(item.get("level", "info")),
         schema_version=int(item.get("schemaVersion") or item.get("schema_version") or 1),
         redacted=bool(item.get("redacted", False)),
+        payload_schema_version=_payload_schema_version(item),
+        payload_schema_valid=_payload_schema_valid(item),
+        payload_schema_errors=_payload_schema_errors(item),
     )
+
+
+def _payload_schema_version(item: dict[str, Any]) -> int:
+    payload_schema = item.get("payloadSchema") or item.get("payload_schema") or {}
+    if not isinstance(payload_schema, dict):
+        return 1
+    return _optional_int(payload_schema.get("version"), default=1)
+
+
+def _payload_schema_valid(item: dict[str, Any]) -> bool:
+    payload_schema = item.get("payloadSchema") or item.get("payload_schema") or {}
+    if not isinstance(payload_schema, dict):
+        return True
+    return bool(payload_schema.get("valid", True))
+
+
+def _payload_schema_errors(item: dict[str, Any]) -> list[str]:
+    payload_schema = item.get("payloadSchema") or item.get("payload_schema") or {}
+    if not isinstance(payload_schema, dict):
+        return []
+    return _string_list(payload_schema.get("errors"))
 
 
 def _max_record_number(records: list[EventRecord], prefix: str) -> int:
@@ -560,82 +666,5 @@ def _memory_status(value: Any) -> MemoryStatus:
     return "archived" if value == "archived" else "active"
 
 
-def _memory_importance(memory_type: str, scores: dict[str, int]) -> int:
-    """根据 MemoryPolicy 评分推导 0-100 的重要性。
-
-    重要性不是“是否保存”的二次判断;是否保存已经由 MemoryPolicy 决定。
-    它用于后续排序、retention 和人工审核。
-    """
-
-    positive_keys = {
-        "future_relevance",
-        "stability",
-        "user_preference",
-        "task_continuity",
-        "explicit_memory_intent",
-        "user_profile",
-    }
-    positive_score = sum(_optional_int(scores.get(key), 0) for key in positive_keys)
-    type_boost = {
-        "user_profile": 30,
-        "preference": 25,
-        "task_state": 15,
-        "task_context": 15,
-        "long_term_note": 10,
-    }.get(memory_type, 5)
-    sensitivity_penalty = _optional_int(scores.get("sensitivity_risk"), 0) * 10
-    return _clamp_int((positive_score * 8) + type_boost - sensitivity_penalty, 0, 100)
-
-
-def _default_memory_expiry(memory_type: str, created_at: str) -> str | None:
-    """给阶段性记忆设置默认过期时间。
-
-    用户资料和长期偏好通常不自动过期;任务状态默认 30 天后归档。
-    """
-
-    if memory_type not in {"task_state", "task_context"}:
-        return None
-    created = _parse_iso(created_at)
-    return (created + timedelta(days=30)).isoformat()
-
-
-def _is_memory_expired(memory: MemoryRecord, now: datetime) -> bool:
-    if memory.expires_at is None:
-        return False
-    return _parse_iso(memory.expires_at) <= now
-
-
-def _parse_iso(value: str) -> datetime:
-    try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return datetime.now(timezone.utc)
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=timezone.utc)
-    return parsed
-
-
-def _memory_retention_sort_key(memory: MemoryRecord) -> tuple[int, int, float]:
-    timestamp = _parse_iso(memory.updated_at or memory.created_at).timestamp()
-    return (memory.importance, memory.access_count, timestamp)
-
-
-def _memory_semantic_key(memory_type: str, text: str) -> str | None:
-    normalized = _normalize_memory_text(text).lower()
-    compact = (
-        normalized.replace(" ", "")
-        .replace("，", ",")
-        .replace("、", ",")
-        .replace("：", ":")
-    )
-    if memory_type == "user_profile":
-        if "技术栈" in compact or "techstack" in compact or "常用技术" in compact:
-            return "user_profile:tech_stack"
-    if memory_type == "preference":
-        if "学习" in compact and ("分钟" in compact or "时长" in compact or "控制" in compact):
-            return "preference:study_session_duration"
-    return None
-
-
-def _clamp_int(value: int, min_value: int, max_value: int) -> int:
-    return max(min_value, min(max_value, value))
+def _memory_in_namespace(memory: MemoryRecord, user_id: str, tenant_id: str) -> bool:
+    return memory.user_id == user_id and memory.tenant_id == tenant_id
