@@ -79,7 +79,7 @@ Agent.run(goal)
   -> Final Answer
 ```
 
-可观测：`AGENTIC_TRACE=brief` 打印记忆决策(llm/fallback)、每步动作/工具结果、回退原因+模型原始输出、ResponseDecision 的 tiers/reason。`AGENTIC_EVENT_LOG=jsonl|sqlite` 可追加写入本地事件日志,`agentic_core.event_log` 可按 runId 查看时间线。JSONL 写入默认启用同名 `.lock` 文件,保护大小轮转和追加写入;事件查看默认读取轮转备份,也可用 `--current-only` 只看当前文件。SQLite 后端使用 `data/events.db`,支持本地结构化查询。
+可观测：`AGENTIC_TRACE=brief` 打印记忆决策(llm/fallback)、每步动作/工具结果、回退原因+模型原始输出、ResponseDecision 的 tiers/reason。`AGENTIC_EVENT_LOG=jsonl|sqlite` 可追加写入本地事件日志,`agentic_core.observability.event_log` 可按 runId 查看时间线。JSONL 写入默认启用同名 `.lock` 文件,保护大小轮转和追加写入;事件查看默认读取轮转备份,也可用 `--current-only` 只看当前文件。SQLite 后端使用 `data/events.db`,支持本地结构化查询。
 
 新增模块：`memory_policy.LlmMemoryPolicy` / `response_policy` / `responder` / `trace_view` / `json_utils` / `event_payloads` / `event_writer` / `event_log` / `eval_dataset` / `eval_review` / `eval_diff` / `eval_history` / `eval_harness` / `middleware`。
 
@@ -116,8 +116,8 @@ cd /Users/jurongchao/Desktop/ai学习测试库/agentic
 .venv/bin/python -m pytest -q  # 275 passed
 .venv/bin/python -m mypy agentic_core
 python3 -m compileall agentic_core examples tests
-python3 -m agentic_core.eval_harness
-python3 -m agentic_core.eval_harness --json
+python3 -m evalops.harness
+python3 -m evalops.harness --json
 ```
 
 LLM 相关全部用 stub client 覆盖，不依赖真实 Ollama；真实 Ollama 仅用于端到端手动验证。

@@ -9,7 +9,7 @@ cd /Users/jurongchao/Desktop/ai学习测试库/agentic
 .venv/bin/python -m pytest -q
 .venv/bin/python -m mypy agentic_core
 python3 -m compileall agentic_core examples tests
-python3 -m agentic_core.eval_harness
+python3 -m evalops.harness
 ```
 
 当前已验证状态:
@@ -73,11 +73,11 @@ AGENTIC_PLANNER=rule AGENTIC_MEMORY_POLICY=rule AGENTIC_TRACE=off \
 审核/维护长期记忆:
 
 ```bash
-python3 -m agentic_core.memory_admin list --path data/memory.json --user-id local_user --tenant-id default_tenant
-python3 -m agentic_core.memory_admin archive --path data/memory.json --memory-id memory_1 --reason "人工审核归档"
-python3 -m agentic_core.memory_admin set-importance --path data/memory.json --memory-id memory_1 --importance 80
-python3 -m agentic_core.memory_admin conflicts --path data/memory.json --user-id local_user --tenant-id default_tenant
-python3 -m agentic_core.memory_admin resolve-conflict --path data/memory.json --keep-memory-id memory_2 --reason "保留最新长期记忆"
+python3 -m agentic_core.memory.admin list --path data/memory.json --user-id local_user --tenant-id default_tenant
+python3 -m agentic_core.memory.admin archive --path data/memory.json --memory-id memory_1 --reason "人工审核归档"
+python3 -m agentic_core.memory.admin set-importance --path data/memory.json --memory-id memory_1 --importance 80
+python3 -m agentic_core.memory.admin conflicts --path data/memory.json --user-id local_user --tenant-id default_tenant
+python3 -m agentic_core.memory.admin resolve-conflict --path data/memory.json --keep-memory-id memory_2 --reason "保留最新长期记忆"
 ```
 
 缺信息追问:
@@ -106,7 +106,7 @@ JSONL 事件:
 ```bash
 AGENTIC_EVENT_LOG=jsonl AGENTIC_EVENT_LOG_PATH=data/events.jsonl \
   python3 -m agentic_core.cli "帮我计算 128 * 7"
-python3 -m agentic_core.event_log --path data/events.jsonl
+python3 -m agentic_core.observability.event_log --path data/events.jsonl
 ```
 
 SQLite 事件:
@@ -114,66 +114,66 @@ SQLite 事件:
 ```bash
 AGENTIC_EVENT_LOG=sqlite AGENTIC_EVENT_LOG_PATH=data/events.db \
   python3 -m agentic_core.cli "帮我计算 128 * 7"
-python3 -m agentic_core.event_log --backend sqlite --path data/events.db
+python3 -m agentic_core.observability.event_log --backend sqlite --path data/events.db
 ```
 
 从事件日志生成 eval dataset 草稿:
 
 ```bash
-python3 -m agentic_core.eval_dataset --backend jsonl --path data/events.jsonl --output data/eval-dataset.json
-python3 -m agentic_core.eval_harness --cases data/eval-dataset.json
+python3 -m evalops.dataset --backend jsonl --path data/events.jsonl --output data/eval-dataset.json
+python3 -m evalops.harness --cases data/eval-dataset.json
 ```
 
 生成 replay inspection bundle:
 
 ```bash
-python3 -m agentic_core.eval_replay --backend jsonl --path data/events.jsonl --run-id run_xxx
-python3 -m agentic_core.eval_replay --backend sqlite --path data/events.db --run-id run_xxx --json
+python3 -m evalops.replay --backend jsonl --path data/events.jsonl --run-id run_xxx
+python3 -m evalops.replay --backend sqlite --path data/events.db --run-id run_xxx --json
 ```
 
 生成复核队列:
 
 ```bash
-python3 -m agentic_core.eval_sampling --input data/eval-dataset.json
-python3 -m agentic_core.eval_sampling --input data/eval-dataset.json --reason needs_judge_label --limit 20 --json
+python3 -m evalops.sampling --input data/eval-dataset.json
+python3 -m evalops.sampling --input data/eval-dataset.json --reason needs_judge_label --limit 20 --json
 ```
 
 审核 dataset 并要求只跑 golden:
 
 ```bash
-python3 -m agentic_core.eval_review apply --input data/eval-dataset.json --output data/eval-golden.json --approve-all --reviewer local
-python3 -m agentic_core.eval_harness --cases data/eval-golden.json --require-reviewed
+python3 -m evalops.review apply --input data/eval-dataset.json --output data/eval-golden.json --approve-all --reviewer local
+python3 -m evalops.harness --cases data/eval-golden.json --require-reviewed
 ```
 
 统计多人复核一致性:
 
 ```bash
-python3 -m agentic_core.eval_review state --input data/eval-golden.json
-python3 -m agentic_core.eval_review state --input data/eval-golden.json --score-tolerance 5 --json
-python3 -m agentic_core.eval_review agreement --input data/eval-golden.json
-python3 -m agentic_core.eval_review agreement --input data/eval-golden.json --score-tolerance 5 --json
+python3 -m evalops.review state --input data/eval-golden.json
+python3 -m evalops.review state --input data/eval-golden.json --score-tolerance 5 --json
+python3 -m evalops.review agreement --input data/eval-golden.json
+python3 -m evalops.review agreement --input data/eval-golden.json --score-tolerance 5 --json
 ```
 
 对比 eval 报告:
 
 ```bash
-python3 -m agentic_core.eval_harness --json > data/eval-base.json
-python3 -m agentic_core.eval_harness --json > data/eval-candidate.json
-python3 -m agentic_core.eval_diff --base data/eval-base.json --candidate data/eval-candidate.json --fail-on-regression
+python3 -m evalops.harness --json > data/eval-base.json
+python3 -m evalops.harness --json > data/eval-candidate.json
+python3 -m evalops.diff --base data/eval-base.json --candidate data/eval-candidate.json --fail-on-regression
 ```
 
 记录 eval 趋势:
 
 ```bash
-python3 -m agentic_core.eval_harness --json > data/eval-current.json
-python3 -m agentic_core.eval_history append --report data/eval-current.json --history data/eval-history.jsonl --label local
-python3 -m agentic_core.eval_history list --history data/eval-history.jsonl
+python3 -m evalops.harness --json > data/eval-current.json
+python3 -m evalops.history append --report data/eval-current.json --history data/eval-history.jsonl --label local
+python3 -m evalops.history list --history data/eval-history.jsonl
 ```
 
 生成本地治理 dashboard:
 
 ```bash
-python3 -m agentic_core.eval_dashboard \
+python3 -m evalops.governance.dashboard \
   --report data/eval-current.json \
   --history data/eval-history.jsonl \
   --dataset data/eval-golden.json \
@@ -184,7 +184,7 @@ python3 -m agentic_core.eval_dashboard \
 启动只读本地治理服务:
 
 ```bash
-python3 -m agentic_core.eval_server \
+python3 -m evalops.governance.server \
   --report data/eval-current.json \
   --history data/eval-history.jsonl \
   --dataset data/eval-golden.json \
@@ -198,7 +198,7 @@ python3 -m agentic_core.eval_server \
 
 ```bash
 AGENTIC_EVAL_SERVER_TOKEN=local-secret \
-python3 -m agentic_core.eval_server \
+python3 -m evalops.governance.server \
   --dataset data/eval-dataset.json \
   --review-output data/eval-golden.json \
   --review-store data/reviews.db \
@@ -210,13 +210,13 @@ python3 -m agentic_core.eval_server \
 ```bash
 AGENTIC_EVAL_SERVER_VIEWER_TOKEN=view-secret \
 AGENTIC_EVAL_SERVER_REVIEWER_TOKEN=review-secret \
-python3 -m agentic_core.eval_server --dataset data/eval-dataset.json --review-output data/eval-golden.json --review-store data/reviews.db
+python3 -m evalops.governance.server --dataset data/eval-dataset.json --review-output data/eval-golden.json --review-store data/reviews.db
 ```
 
 生成 signed claims token:
 
 ```bash
-python3 -m agentic_core.auth_tokens create \
+python3 -m evalops.governance.auth_tokens create \
   --secret local-signing-secret \
   --subject reviewer_1 \
   --tenant default_tenant \
@@ -227,7 +227,7 @@ python3 -m agentic_core.auth_tokens create \
 查看 tenant policy:
 
 ```bash
-python3 -m agentic_core.tenant_policy show --path data/tenant-policy.json
+python3 -m evalops.governance.tenant_policy show --path data/tenant-policy.json
 ```
 
 路由:
@@ -243,27 +243,27 @@ python3 -m agentic_core.tenant_policy show --path data/tenant-policy.json
 启用 eval judge:
 
 ```bash
-python3 -m agentic_core.eval_harness --judge rule
-AGENTIC_MODEL=openhermes:latest python3 -m agentic_core.eval_harness --judge llm
+python3 -m evalops.harness --judge rule
+AGENTIC_MODEL=openhermes:latest python3 -m evalops.harness --judge llm
 ```
 
 校验 judge rubric 注册表:
 
 ```bash
-python3 -m agentic_core.eval_judge_registry list
-python3 -m agentic_core.eval_judge_registry validate --input data/eval-golden.json
+python3 -m evalops.judge_registry list
+python3 -m evalops.judge_registry validate --input data/eval-golden.json
 ```
 
 当 golden dataset case 标注为 `strict_answer_quality:v1` 时:
 
 ```bash
-python3 -m agentic_core.eval_harness --cases data/eval-golden.json --judge rule --judge-rubric strict_answer_quality --judge-rubric-version v1
+python3 -m evalops.harness --cases data/eval-golden.json --judge rule --judge-rubric strict_answer_quality --judge-rubric-version v1
 ```
 
 审核时写入 judge 人工 label:
 
 ```bash
-python3 -m agentic_core.eval_review apply \
+python3 -m evalops.review apply \
   --input data/eval-dataset.json \
   --output data/eval-golden.json \
   --approve-all \
@@ -273,7 +273,7 @@ python3 -m agentic_core.eval_review apply \
   --expected-judge-score 95 \
   --expected-judge-passed true \
   --judge-score-tolerance 5
-python3 -m agentic_core.eval_harness --cases data/eval-golden.json --require-reviewed --judge rule
+python3 -m evalops.harness --cases data/eval-golden.json --require-reviewed --judge rule
 ```
 
 ## 仍未等同于完整生产的部分

@@ -128,9 +128,9 @@ AGENTIC_EVENT_LOG=jsonl AGENTIC_EVENT_LOG_PATH=data/events.jsonl python3 -m agen
 查看事件:
 
 ```bash
-python3 -m agentic_core.event_log --path data/events.jsonl
-python3 -m agentic_core.event_log --path data/events.jsonl --run-id run_123
-python3 -m agentic_core.event_log --path data/events.jsonl --current-only
+python3 -m agentic_core.observability.event_log --path data/events.jsonl
+python3 -m agentic_core.observability.event_log --path data/events.jsonl --run-id run_123
+python3 -m agentic_core.observability.event_log --path data/events.jsonl --current-only
 ```
 
 ## Eval
@@ -138,8 +138,8 @@ python3 -m agentic_core.event_log --path data/events.jsonl --current-only
 运行确定性 eval:
 
 ```bash
-python3 -m agentic_core.eval_harness
-python3 -m agentic_core.eval_harness --json
+python3 -m evalops.harness
+python3 -m evalops.harness --json
 ```
 
 当前 eval 完全离线,使用规则 planner/policy/safety,适合做稳定回归门禁。

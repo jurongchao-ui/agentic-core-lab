@@ -47,24 +47,24 @@ python3 -m agentic_core.chat
 运行 eval:
 
 ```bash
-python3 -m agentic_core.eval_harness
-python3 -m agentic_core.eval_harness --json
+python3 -m evalops.harness
+python3 -m evalops.harness --json
 ```
 
 审核/维护长期记忆:
 
 ```bash
-python3 -m agentic_core.memory_admin list --path data/memory.json --user-id local_user --tenant-id default_tenant
-python3 -m agentic_core.memory_admin archive --path data/memory.json --memory-id memory_1 --reason "人工审核归档"
-python3 -m agentic_core.memory_admin set-importance --path data/memory.json --memory-id memory_1 --importance 80
-python3 -m agentic_core.memory_admin conflicts --path data/memory.json --user-id local_user --tenant-id default_tenant
-python3 -m agentic_core.memory_admin resolve-conflict --path data/memory.json --keep-memory-id memory_2 --reason "保留最新长期记忆"
+python3 -m agentic_core.memory.admin list --path data/memory.json --user-id local_user --tenant-id default_tenant
+python3 -m agentic_core.memory.admin archive --path data/memory.json --memory-id memory_1 --reason "人工审核归档"
+python3 -m agentic_core.memory.admin set-importance --path data/memory.json --memory-id memory_1 --importance 80
+python3 -m agentic_core.memory.admin conflicts --path data/memory.json --user-id local_user --tenant-id default_tenant
+python3 -m agentic_core.memory.admin resolve-conflict --path data/memory.json --keep-memory-id memory_2 --reason "保留最新长期记忆"
 ```
 
 启动只读本地 eval 治理服务:
 
 ```bash
-python3 -m agentic_core.eval_server \
+python3 -m evalops.governance.server \
   --report data/eval-current.json \
   --history data/eval-history.jsonl \
   --dataset data/eval-golden.json \
@@ -78,7 +78,7 @@ python3 -m agentic_core.eval_server \
 
 ```bash
 AGENTIC_EVAL_SERVER_TOKEN=local-secret \
-python3 -m agentic_core.eval_server \
+python3 -m evalops.governance.server \
   --dataset data/eval-dataset.json \
   --review-output data/eval-golden.json \
   --review-store data/reviews.db \
@@ -90,13 +90,13 @@ python3 -m agentic_core.eval_server \
 ```bash
 AGENTIC_EVAL_SERVER_VIEWER_TOKEN=view-secret \
 AGENTIC_EVAL_SERVER_REVIEWER_TOKEN=review-secret \
-python3 -m agentic_core.eval_server --dataset data/eval-dataset.json --review-output data/eval-golden.json --review-store data/reviews.db
+python3 -m evalops.governance.server --dataset data/eval-dataset.json --review-output data/eval-golden.json --review-store data/reviews.db
 ```
 
 也可以使用本地 signed claims token:
 
 ```bash
-python3 -m agentic_core.auth_tokens create \
+python3 -m evalops.governance.auth_tokens create \
   --secret local-signing-secret \
   --subject reviewer_1 \
   --tenant default_tenant \
@@ -105,7 +105,7 @@ python3 -m agentic_core.auth_tokens create \
 
 AGENTIC_EVAL_SERVER_SIGNING_SECRET=local-signing-secret \
 AGENTIC_EVAL_SERVER_TENANT_POLICY=data/tenant-policy.json \
-python3 -m agentic_core.eval_server --dataset data/eval-dataset.json --review-output data/eval-golden.json --review-store data/reviews.db
+python3 -m evalops.governance.server --dataset data/eval-dataset.json --review-output data/eval-golden.json --review-store data/reviews.db
 ```
 
 ## 文档导航
@@ -152,7 +152,7 @@ eval harness: 8/8 passed, Gate PASS
 .venv/bin/python -m pytest -q
 .venv/bin/python -m mypy agentic_core
 python3 -m compileall agentic_core examples tests
-python3 -m agentic_core.eval_harness
+python3 -m evalops.harness
 ```
 
 ## 仓库结构

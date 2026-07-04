@@ -108,10 +108,10 @@ AGENTIC_TRACE=json python3 -m agentic_core.cli "帮我计算 128 * 7"
 查看事件日志:
 
 ```bash
-python3 -m agentic_core.event_log --path data/events.jsonl
-python3 -m agentic_core.event_log --path data/events.jsonl --run-id run_123
-python3 -m agentic_core.event_log --path data/events.jsonl --current-only
-python3 -m agentic_core.event_log --backend sqlite --path data/events.db
+python3 -m agentic_core.observability.event_log --path data/events.jsonl
+python3 -m agentic_core.observability.event_log --path data/events.jsonl --run-id run_123
+python3 -m agentic_core.observability.event_log --path data/events.jsonl --current-only
+python3 -m agentic_core.observability.event_log --backend sqlite --path data/events.db
 ```
 
 ## 安全与敏感信息
@@ -147,7 +147,7 @@ data/*.jsonl.lock
 .venv/bin/python -m pytest -q
 .venv/bin/python -m mypy agentic_core
 python3 -m compileall agentic_core examples tests
-python3 -m agentic_core.eval_harness
+python3 -m evalops.harness
 ```
 
 CI 使用 `.github/workflows/ci.yml` 跑 mypy + pytest。
