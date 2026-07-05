@@ -136,9 +136,48 @@ def test_json_memory_store_loads_old_memory_without_lifecycle_fields(tmp_path) -
     assert memory.snapshot().long_term_memories[0].text == "用户偏好: 每次 30 分钟"
 
 
+def test_json_memory_store_migrates_old_event_payload_schema_on_load(tmp_path) -> None:
+    path = tmp_path / "memory.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "notes": [],
+                "todos": [],
+                "long_term_memories": [],
+                "events": [
+                    {
+                        "id": "event_1",
+                        "type": "run_started",
+                        "runId": "run_1",
+                        "payload": {"goal": "hello"},
+                        "createdAt": "2026-07-02T00:00:00+00:00",
+                        "payloadSchema": {
+                            "version": 1,
+                            "valid": False,
+                            "errors": ["missing required payload field: identity"],
+                        },
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    memory = JsonMemoryStore(path)
+    event = memory.events[0]
+
+    assert event.payload_schema_version == 2
+    assert event.payload_schema_valid is True
+    assert event.payload["identity"]["userId"] == "unknown"
+    assert event.payload_schema_migrations == ["run_started.v1.add_unknown_identity"]
+
+
 def test_build_memory_store_from_env_defaults_to_memory_store(monkeypatch) -> None:
     monkeypatch.delenv("AGENTIC_MEMORY_STORE", raising=False)
     monkeypatch.delenv("AGENTIC_MEMORY_PATH", raising=False)
+    monkeypatch.delenv("AGENTIC_MEMORY_LIFECYCLE_POLICY_PATH", raising=False)
 
     memory = build_memory_store_from_env()
 
@@ -149,8 +188,52 @@ def test_build_memory_store_from_env_can_enable_json_store(tmp_path, monkeypatch
     path = tmp_path / "memory.json"
     monkeypatch.setenv("AGENTIC_MEMORY_STORE", "json")
     monkeypatch.setenv("AGENTIC_MEMORY_PATH", str(path))
+    monkeypatch.delenv("AGENTIC_MEMORY_LIFECYCLE_POLICY_PATH", raising=False)
 
     memory = build_memory_store_from_env()
 
     assert isinstance(memory, JsonMemoryStore)
     assert memory.path == path
+
+
+def test_build_memory_store_from_env_loads_lifecycle_policy_for_memory_store(tmp_path, monkeypatch) -> None:
+    policy_path = tmp_path / "memory-lifecycle-policy.json"
+    policy_path.write_text(
+        json.dumps({"schemaVersion": 1, "taskMemoryTtlDays": 3}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("AGENTIC_MEMORY_STORE", raising=False)
+    monkeypatch.delenv("AGENTIC_MEMORY_PATH", raising=False)
+    monkeypatch.setenv("AGENTIC_MEMORY_LIFECYCLE_POLICY_PATH", str(policy_path))
+
+    memory = build_memory_store_from_env()
+    record = memory.add_long_term_memory("task_state", "任务状态: env policy", "test", {})
+
+    assert not isinstance(memory, JsonMemoryStore)
+    assert memory.lifecycle_policy.task_memory_ttl_days == 3
+    assert record.expires_at is not None
+
+
+def test_build_memory_store_from_env_loads_lifecycle_policy_for_json_store(tmp_path, monkeypatch) -> None:
+    memory_path = tmp_path / "memory.json"
+    policy_path = tmp_path / "memory-lifecycle-policy.json"
+    policy_path.write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "typeImportanceBoosts": {"user_profile": 90},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("AGENTIC_MEMORY_STORE", "json")
+    monkeypatch.setenv("AGENTIC_MEMORY_PATH", str(memory_path))
+    monkeypatch.setenv("AGENTIC_MEMORY_LIFECYCLE_POLICY_PATH", str(policy_path))
+
+    memory = build_memory_store_from_env()
+    record = memory.add_long_term_memory("user_profile", "用户技术栈: Python", "test", {})
+
+    assert isinstance(memory, JsonMemoryStore)
+    assert memory.lifecycle_policy.type_importance_boosts["user_profile"] == 90
+    assert record.importance == 90

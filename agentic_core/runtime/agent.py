@@ -50,6 +50,7 @@ from agentic_core.observability.event_payloads import (
     RunStartedPayload,
     SafetyDecisionPayload,
     SafetyRefusalPayload,
+    SafetyReviewQueuedPayload,
     ToolObservationPayload,
     ToolStartedPayload,
 )
@@ -58,6 +59,12 @@ from agentic_core.tools.middleware import MiddlewarePipeline, ToolCallContext
 from agentic_core.policies.response import ResponseContext, ResponseDecision, RuleBasedResponsePolicy
 from agentic_core.runtime.context import RuntimeIdentity
 from agentic_core.policies.safety import RuleBasedSafetyPolicy
+from agentic_core.policies.safety_review import (
+    InMemorySafetyReviewQueue,
+    SafetyReviewItem,
+    SafetyReviewQueue,
+    make_safety_review_item,
+)
 from agentic_core.runtime.schemas import (
     Action,
     AgentRunResult,
@@ -93,6 +100,7 @@ class Agent:
         responder: Responder | None = None,
         response_policy: ResponsePolicy | None = None,
         safety_policy: SafetyPolicy | None = None,
+        safety_review_queue: SafetyReviewQueue | None = None,
         middleware_pipeline: MiddlewarePipeline | None = None,
         identity: RuntimeIdentity | None = None,
     ) -> None:
@@ -100,6 +108,7 @@ class Agent:
         self.responder = responder
         self.response_policy = response_policy or RuleBasedResponsePolicy()
         self.safety_policy = safety_policy or RuleBasedSafetyPolicy()
+        self.safety_review_queue = safety_review_queue or InMemorySafetyReviewQueue()
         self.tools = tools
         self.memory = memory
         self.memory_policy = memory_policy
@@ -161,6 +170,7 @@ class Agent:
             SafetyDecisionPayload(safety=safety_decision.to_dict()),
         )
         if safety_decision.refuse:
+            self._queue_safety_review_if_needed(state, goal, safety_decision)
             response_decision = self._decide_response(
                 goal=goal,
                 memory_decision=None,
@@ -282,7 +292,7 @@ class Agent:
                 goal=goal,
                 step=step,
                 trace=state.trace,
-                memory_snapshot=self._memory_snapshot(touch_long_term=True),
+                memory_snapshot=self._memory_snapshot(touch_long_term=True, query=goal),
                 available_tools=self.tools.list(),
             )
             action = self.planner.next(context)
@@ -407,17 +417,18 @@ class Agent:
                 trace=trace,
                 planner_answer=planner_answer,
                 incomplete_reason=incomplete_reason,
-                memory_snapshot=self._memory_snapshot(),
+                memory_snapshot=self._memory_snapshot(query=goal),
                 responder=self.responder,
                 safety_decision=safety_decision,
             )
         )
 
-    def _memory_snapshot(self, touch_long_term: bool = False) -> Any:
+    def _memory_snapshot(self, touch_long_term: bool = False, query: str | None = None) -> Any:
         return self.memory.snapshot(
             touch_long_term=touch_long_term,
             user_id=self.identity.user_id,
             tenant_id=self.identity.tenant_id,
+            query=query,
         )
 
     def _execute_action(self, state: AgentRunState, action: Action, started_at: float) -> Observation:
@@ -500,6 +511,64 @@ class Agent:
         )
         state.events.append(event)
 
+    def _queue_safety_review_if_needed(
+        self,
+        state: AgentRunState,
+        goal: str,
+        safety_decision: SafetyDecision,
+    ) -> SafetyReviewItem | None:
+        """action=review 时把请求放入人审队列。
+
+        review 和 refuse 都会阻断本轮;区别是 review 需要后续人工判断。
+        队列写入失败不应该让用户请求继续执行,所以这里只记录 metadata 和 warning 事件。
+        """
+
+        if safety_decision.action != "review":
+            return None
+        item = make_safety_review_item(
+            item_id=f"safety_review_{state.run_id}",
+            run_id=state.run_id,
+            goal=goal,
+            safety_decision=safety_decision.to_dict(),
+            identity=state.identity.to_dict(),
+        )
+        try:
+            queued_item = self.safety_review_queue.enqueue(item)
+        except Exception as error:
+            safety_decision.metadata["reviewQueue"] = {
+                "queued": False,
+                "error": str(error),
+            }
+            self._record_event(
+                state,
+                "safety_review_queued",
+                SafetyReviewQueuedPayload(
+                    review_item={
+                        "id": item.id,
+                        "runId": item.run_id,
+                        "status": "failed",
+                        "error": str(error),
+                    },
+                    safety=safety_decision.to_dict(),
+                ),
+                level="warn",
+            )
+            return None
+        safety_decision.metadata["reviewQueue"] = {
+            "queued": True,
+            "reviewItemId": queued_item.id,
+            "status": queued_item.status,
+        }
+        self._record_event(
+            state,
+            "safety_review_queued",
+            SafetyReviewQueuedPayload(
+                review_item=queued_item.to_dict(),
+                safety=safety_decision.to_dict(),
+            ),
+        )
+        return queued_item
+
     def _build_result(
         self,
         state: AgentRunState,
@@ -525,7 +594,7 @@ class Agent:
             memory_decision=memory_decision,
             response_decision=response_decision,
             trace=list(state.trace),
-            memory_snapshot=self._memory_snapshot(),
+            memory_snapshot=self._memory_snapshot(query=state.goal),
             events=list(state.events),
             started_at=state.started_at,
             completed_at=now_iso(),
@@ -573,7 +642,7 @@ class Agent:
             memory_decision=memory_decision,
             response_decision=response_decision,
             trace=list(state.trace),
-            memory_snapshot=self._memory_snapshot(),
+            memory_snapshot=self._memory_snapshot(query=goal),
             events=list(state.events),
             started_at=state.started_at,
             completed_at=now_iso(),

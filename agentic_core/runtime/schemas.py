@@ -33,6 +33,7 @@ EventType = Literal[
     "run_started",
     "safety_decision",
     "safety_refusal",
+    "safety_review_queued",
     "memory_decision",
     "memory_saved",
     "memory_clarification",
@@ -352,6 +353,7 @@ class EventRecord:
     payload_schema_version: int = 1
     payload_schema_valid: bool = True
     payload_schema_errors: list[str] = field(default_factory=list)
+    payload_schema_migrations: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         data = {
@@ -384,6 +386,8 @@ class EventRecord:
             "valid": self.payload_schema_valid,
             # 校验错误列表。为空表示通过。
             "errors": list(self.payload_schema_errors),
+            # 从旧 payload schema 迁移到当前版本时执行过哪些迁移。
+            "migrationsApplied": list(self.payload_schema_migrations),
         }
         return data
 

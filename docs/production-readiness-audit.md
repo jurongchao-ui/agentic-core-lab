@@ -24,7 +24,7 @@
 当前门禁状态:
 
 ```text
-pytest: 275 passed
+pytest: 330 passed
 mypy: success
 compileall: passed
 eval harness: 8/8 passed, Gate PASS
@@ -43,8 +43,8 @@ eval harness: 8/8 passed, Gate PASS
 
 - 已有学习版 `RuntimeIdentity` 身份上下文、本地 signed claims token 和 tenant policy JSON,但没有真实登录/OIDC/JWT provider/集中式租户策略服务。
 - 事件日志已有本地 SQLite 后端,但还没有服务端数据库级事件平台和记忆后端。
-- 没有外部 moderation、人审队列和策略中心。
-- 没有 embedding/向量记忆。
+- 没有外部 moderation、协作式人审平台和策略中心。
+- 已有本地 hashing embedding 检索边界,但没有真实 embedding 模型和向量数据库。
 - 已有本地 replay inspection bundle、人工标注数据流和带可选 Bearer Token / review 写入 API / review decisions 分页 API / SQLite review store / JSONL 审计事件的 eval governance server,但没有线上协作标注平台。
 - 已有本地 HTML/JSON eval governance dashboard、标准库服务端认证、signed claims token、tenant policy JSON、写入/RBAC/review state 边界,但没有真实身份系统、集中式租户策略服务和多人协作的生产治理后台。
 
@@ -54,7 +54,7 @@ eval harness: 8/8 passed, Gate PASS
 
 证据:
 
-- `agentic_core/schemas.py`
+- `agentic_core/runtime/schemas.py`
   - `Action`
   - `Observation`
   - `MemoryDecision`
@@ -69,7 +69,8 @@ eval harness: 8/8 passed, Gate PASS
   - typed event payload dataclass
   - event payload required-field schema registry
   - payload validation result
-- `agentic_core/agent.py`
+  - payload schema migration
+- `agentic_core/runtime/agent.py`
   - `Agent.run_typed() -> AgentRunResult`
   - `Agent.run() -> dict` 兼容旧 CLI/Chat
 - `tests/test_typed_state.py`
@@ -82,17 +83,15 @@ eval harness: 8/8 passed, Gate PASS
 - 对外 JSON 保持兼容字段,例如 `runId`、`memoryDecision`、`longTermMemories`。
 - Safety/Memory/Trace/Event/Result 都有 typed 外壳。
 - Agent 主链路事件 payload 使用 typed dataclass。
-- `MemoryStore.record_event()` 会写入 `payloadSchema.valid/errors` 校验结果。
+- `MemoryStore.record_event()` 会先迁移旧 payload,再写入 `payloadSchema.valid/errors/migrationsApplied` 校验结果。
 
 仍未等同完整生产:
 
 - 未引入 Pydantic / attrs / msgspec 等运行时 schema 校验库。
-- Event payload 已有学习版 required-field schema,但还不是强运行时 schema。
-- 没有 schema migration 工具。
+- Event payload 已有学习版 required-field schema 和 migration 层,但还不是强运行时 schema。
 
 建议后续:
 
-- 给 `EventRecord.payload` 增加 schema migration。
 - 再考虑从 dataclass + required-field 校验迁移到 Pydantic v2 或 msgspec。
 
 ## 阶段 2: SafetyPolicy
@@ -101,14 +100,20 @@ eval harness: 8/8 passed, Gate PASS
 
 证据:
 
-- `agentic_core/safety_policy.py`
+- `agentic_core/policies/safety.py`
   - `SafetyRule`
   - `RuleBasedSafetyPolicy`
   - `LlmSafetyPolicy`
   - `CompositeSafetyPolicy`
   - `build_safety_policy_from_env`
-- `agentic_core/agent.py`
+- `agentic_core/policies/safety_review.py`
+  - `SafetyReviewQueue`
+  - `InMemorySafetyReviewQueue`
+  - `JsonlSafetyReviewQueue`
+  - `build_safety_review_queue_from_env`
+- `agentic_core/runtime/agent.py`
   - SafetyPolicy 在 MemoryPolicy / Planner / Tool 之前运行
+  - action=review 时写入 SafetyReviewQueue 并记录 `safety_review_queued`
 - `tests/test_safety_policy.py`
 - `tests/test_contracts.py`
 - `docs/architecture.md`
@@ -120,20 +125,22 @@ eval harness: 8/8 passed, Gate PASS
 - `review/refuse` 会阻断整轮。
 - LLM checker 失败会回退规则版。
 - Composite checker 可选 fail-open / fail-closed。
+- review 动作可进入本地 SafetyReviewQueue。
+- 支持 JSONL safety review queue,便于本地持久化审核证据。
 - SafetyDecision 会进入事件日志和最终结果。
 
 仍未等同完整生产:
 
 - 没有接 OpenAI moderation 或其他外部安全服务。
-- 没有人审队列。
-- 没有租户级安全策略。
-- 没有按工具调用内容做更细粒度的 tool-output safety。
+- SafetyReviewQueue 仍是本地内存/JSONL 版本,不是协作式人审平台。
+- 没有租户级安全策略中心。
+- tool-output safety 已有 middleware 基础版,但还不是完整 DLP/外部内容安全服务。
 
 建议后续:
 
 - 增加外部 moderation adapter。
-- 增加 human review queue 的接口。
-- 将 request safety 与 tool safety 分层。
+- 将 SafetyReviewQueue 接入协作式审核平台或工单系统。
+- 将 request safety 与 tool safety 接入统一策略中心和外部内容安全服务。
 
 ## 阶段 3: Tool Metadata
 
@@ -141,10 +148,13 @@ eval harness: 8/8 passed, Gate PASS
 
 证据:
 
-- `agentic_core/tools.py`
+- `agentic_core/tools/registry.py`
   - `ToolSpec`
   - `ToolRegistry`
   - `to_public_dict()`
+  - `input_schema_to_json_schema()`
+  - `catalog()`
+  - `validate_catalog()`
 - `tests/test_tool_metadata.py`
 - `tests/test_tool_schema_single_source.py`
 - `docs/architecture.md`
@@ -152,6 +162,7 @@ eval harness: 8/8 passed, Gate PASS
 已满足:
 
 - 工具参数 schema 是单一真相源。
+- 暴露 `inputJsonSchema` JSON Schema 子集,供外部治理和文档系统使用。
 - 每个工具暴露:
   - `permissionScope`
   - `sideEffect`
@@ -162,18 +173,31 @@ eval harness: 8/8 passed, Gate PASS
   - `requiresApproval`
   - `guardSensitive`
   - `version`
+  - `owner`
+  - `slaTier`
+  - `dataClassification`
+  - `auditClassification`
+  - `externalSideEffect`
+  - `lifecycleStatus`
+  - `introducedIn`
+  - `deprecatedIn`
+  - `replacedBy`
+  - `migrationNotes`
+- Tool catalog 可保留 removed 工具供审计。
+- deprecated/removed 工具必须声明替代工具和迁移说明。
+- removed 工具不会暴露给 planner,直接执行也会失败。
 - Planner prompt 和参数校验都从工具 registry 派生。
 
 仍未等同完整生产:
 
-- 没有工具 schema 的 JSON Schema 标准化导出。
-- 没有工具版本迁移策略。
-- 没有工具 owner / SLA / audit classification。
+- JSON Schema 仍是标准库子集,不是完整 OpenAPI/JSON Schema 工具目录。
+- owner/SLA/audit classification 仍是本地静态元数据,未接服务目录或告警系统。
+- 工具 lifecycle/migration 仍是本地校验,未接集中式发布流程。
 
 建议后续:
 
-- 将 `input_schema` 升级为 JSON Schema 子集。
-- 给工具增加 owner、data classification、external side effect level。
+- 将工具目录接入服务 owner / SLA / 数据分级系统。
+- 接入集中式工具发布和版本迁移流程。
 
 ## 阶段 4: Middleware Pipeline
 
@@ -181,14 +205,21 @@ eval harness: 8/8 passed, Gate PASS
 
 证据:
 
-- `agentic_core/middleware.py`
+- `agentic_core/tools/middleware.py`
   - `MiddlewarePipeline`
   - `RuntimeIdentity` 接入 ToolCallContext
   - `ToolGovernancePolicy`
   - `ToolGovernanceMiddleware`
+  - `ToolBudgetStore`
+  - `InMemoryToolBudgetStore`
+  - `JsonFileToolBudgetStore`
   - `CostAccountingMiddleware`
-  - timeout / retry / idempotency / tracing metadata
-- `agentic_core/agent.py`
+  - `ToolOutputSafetyMiddleware`
+  - `IdempotencyStore`
+  - `InMemoryIdempotencyStore`
+  - `JsonFileIdempotencyStore`
+  - timeout / retry / idempotency / tool-output safety / OTel-style tool span sink
+- `agentic_core/runtime/agent.py`
   - 工具执行统一走 `MiddlewarePipeline.execute_tool()`
 - `tests/test_middleware.py`
 - `docs/architecture.md`
@@ -201,22 +232,33 @@ eval harness: 8/8 passed, Gate PASS
 - 支持从 RuntimeIdentity.permissionScopes 派生当前身份授权范围。
 - 支持 risk/sideEffect 审批。
 - 支持 tenant + run 级 cost budget。
+- 支持可注入 ToolBudgetStore;JSON 文件和 SQLite 后端可在同机进程间共享预算。
 - 支持 timeout、retry、idempotency key。
+- 支持 write 工具成功结果的进程内幂等存储;命中时短路返回第一次结果。
+- 支持 JSON 文件和 SQLite 幂等后端,可在同机进程间共享 write 工具幂等结果。
+- idempotency key 包含 run、step、tool、input、tool version、user 和 tenant。
+- read 工具不缓存,失败 write 不缓存。
+- 支持工具输出/错误敏感信息净化,复用 `SENSITIVE_PATTERN`。
+- 支持可注入 `ToolTraceSink`;默认内存 span,也可写入 JSONL 或发送到 OTLP/HTTP collector。
+- 工具 span 覆盖成功、失败、审批短路和幂等命中路径。
+- span 只保存治理元数据和状态,不保存工具输入/输出。
 - Observation metadata 记录审计字段。
 
 仍未等同完整生产:
 
 - timeout 用线程池学习版实现,不能强杀线程。
-- budget 只存在 middleware 实例内存里,没有跨进程共享。
-- 没有 OpenTelemetry span。
-- 没有真实幂等存储,只有 idempotency key 生成。
+- budget 默认仍是内存版;JSON/SQLite 后端只适合同机学习或单机部署,不是 Redis/Postgres 级多机共享预算。
+- 已有标准库 OTel-style span sink 和 OTLP/HTTP exporter,但还没有接官方 OpenTelemetry SDK、采样、跨组件上下文传播和自动 instrumentation。
+- 幂等存储已有本地 JSON/SQLite 后端,但不是 Redis/Postgres 等多机持久后端。
+- tool-output safety 仍是规则净化,不是完整 DLP/外部内容安全服务。
 - RuntimeIdentity 由环境变量构造,不是登录态/JWT。
 
 建议后续:
 
 - 工具自身接底层 HTTP/DB timeout。
-- 添加 OTel tracing adapter。
-- 用持久 idempotency store 管理写入类工具。
+- 接入官方 OpenTelemetry SDK、采样和上下文传播。
+- 用 Redis/Postgres budget store 管理多机预算。
+- 用 Redis/Postgres idempotency store 管理跨进程写入类工具。
 
 ## 阶段 5: Persistent Event Log
 
@@ -224,7 +266,7 @@ eval harness: 8/8 passed, Gate PASS
 
 证据:
 
-- `agentic_core/event_writer.py`
+- `agentic_core/observability/event_writer.py`
   - `EventWriter`
   - `MemoryEventWriter`
   - `JsonlEventWriter`
@@ -232,14 +274,14 @@ eval harness: 8/8 passed, Gate PASS
   - `CompositeEventWriter`
   - redaction
   - rotation / retention / file lock
-- `agentic_core/event_log.py`
+- `agentic_core/observability/event_log.py`
   - JSONL reader
   - SQLite reader
   - rotated backups reader
   - timeline formatter
-- `agentic_core/memory.py`
+- `agentic_core/memory/store.py`
   - `record_event()`
-- `agentic_core/event_payloads.py`
+- `agentic_core/observability/event_payloads.py`
   - payload schema registry
   - typed payload dataclass
   - payload validation
@@ -257,19 +299,19 @@ eval harness: 8/8 passed, Gate PASS
 - SQLite 支持本地结构化查询,按 `(run_id, id)` 避免跨 run 事件 id 冲突。
 - reader 默认读取轮转备份。
 - run 生命周期事件基本完整。
-- 核心事件 payload 写入前有 `payloadSchema` 校验证据。
+- 核心事件 payload 写入前有 schema migration 和 `payloadSchema` 校验证据。
 
 仍未等同完整生产:
 
 - JSONL/SQLite 仍是本地后端,不是 Postgres/ClickHouse/OTel 这类集中式事件平台。
 - 多机并发不适用。
-- Event payload schema 仍是标准库 required-field 版本,不是 Pydantic/msgspec 强校验。
+- Event payload schema/migration 仍是标准库版本,不是 Pydantic/msgspec 强校验。
 - 还没有 deterministic replay,只有 timeline inspection。
 
 建议后续:
 
 - 增加 Postgres/ClickHouse/OTel writer。
-- 增加事件 schema version migration。
+- 增加 EventRecord 外壳 schema migration 和更完整的 payload migration registry。
 - 将 replay 明确拆成 timeline reconstruction 与 deterministic replay。
 
 ## 阶段 6: Memory Lifecycle
@@ -278,7 +320,7 @@ eval harness: 8/8 passed, Gate PASS
 
 证据:
 
-- `agentic_core/memory.py`
+- `agentic_core/memory/store.py`
   - exact dedupe
   - semantic merge rules
   - importance
@@ -286,20 +328,22 @@ eval harness: 8/8 passed, Gate PASS
   - archive expired
   - prune by retention
   - JSON persistence
-- `agentic_core/memory_lifecycle.py`
+- `agentic_core/memory/lifecycle.py`
   - single lifecycle policy source
+  - JSON policy load
+  - policy inspect/validate CLI
   - semantic key
   - conflict key
   - importance
   - default expiry
   - retention sort key
-- `agentic_core/memory_admin.py`
+- `agentic_core/memory/admin.py`
   - namespace list
   - archive
   - set-importance
   - conflicts
   - resolve-conflict
-- `agentic_core/schemas.py`
+- `agentic_core/runtime/schemas.py`
   - MemoryRecord lifecycle fields
 - `tests/test_memory_lifecycle.py`
 - `tests/test_memory_lifecycle_policy.py`
@@ -310,26 +354,32 @@ eval harness: 8/8 passed, Gate PASS
 
 - active/archived 状态。
 - MemoryStore 和 memory_admin 共用 `MemoryLifecyclePolicy`,避免去重/冲突/importance/过期规则漂移。
+- `AGENTIC_MEMORY_LIFECYCLE_POLICY_PATH` 可从 JSON 增量覆盖 TTL、positive score keys 和 type importance boosts。
+- `python3 -m agentic_core.memory.lifecycle show/validate` 可查看和校验策略文件。
 - 长期记忆带 userId/tenantId namespace,Agent 保存和读取 snapshot 时按当前 RuntimeIdentity 隔离。
 - memory_admin 可按 namespace 查看、归档、调整 importance、查看 active 冲突组并解决冲突。
+- memory review HTTP API 可按 namespace 查看、归档、调整 importance、查看/解决冲突。
+- review 写接口要求 Bearer token,避免无认证修改长期记忆。
 - 访问统计。
 - 技术栈和学习时长偏好的规则语义合并。
 - 重要性评分。
 - task_state/task_context 默认过期。
 - retention 归档而非删除。
+- 本地 `HashingMemoryEmbeddingIndex` 支持 query -> long-term memory 相似度排序。
+- Agent 给 planner/response 的 snapshot 会用当前 goal 做长期记忆相关性排序。
 - JSON 持久化兼容旧文件。
 
 仍未等同完整生产:
 
-- 没有 embedding/向量检索。
-- 没有图形化 memory review UI。
-- 语义合并和冲突检测仍是规则版,尚未接入 embedding/人工审核工作流。
-- 生命周期策略仍在代码内,尚未外部化成租户级策略配置。
+- 已有本地 hashing embedding 检索边界,但没有接真实 embedding 模型和向量数据库。
+- 已有最小 memory review API,但没有图形化协作审核 UI。
+- 语义合并和冲突检测仍是规则版,尚未接入真实 embedding/人工审核工作流。
+- 生命周期策略已支持本地 JSON 外部化,尚未接入集中式租户级策略服务。
 
 建议后续:
 
-- 增加向量检索后端。
-- 将本地 memory_admin 升级为服务端审核 UI/API。
+- 增加真实 embedding + 向量数据库后端。
+- 在 memory review API 之上增加图形化协作审核 UI。
 
 ## 阶段 7: Evals
 
@@ -337,25 +387,25 @@ eval harness: 8/8 passed, Gate PASS
 
 证据:
 
-- `agentic_core/eval_harness.py`
+- `evalops/harness.py`
   - `EvalCase`
   - `EvalCaseResult`
   - `EvalReport`
   - `EvalThresholds`
   - `collect_run_metrics`
-- `agentic_core/eval_dataset.py`
+- `evalops/dataset.py`
   - event-log-to-eval dataset draft
   - JSONL/SQLite event reader integration
   - reviewRequired dataset schema
-- `agentic_core/eval_replay.py`
+- `evalops/replay.py`
   - replay inspection bundle
   - JSONL/SQLite event reader integration
   - timeline / tool calls / event counts extraction
-- `agentic_core/eval_dashboard.py`
+- `evalops/governance/dashboard.py`
   - HTML/JSON governance dashboard
   - report/history/dataset aggregation
   - review queue/agreement/rubric validation summary
-- `agentic_core/eval_server.py`
+- `evalops/governance/server.py`
   - 标准库 governance server
   - 可选 Bearer Token 认证
   - signed claims token 验证
@@ -369,30 +419,30 @@ eval harness: 8/8 passed, Gate PASS
   - `/dashboard`
   - `/api/dashboard`
   - `/api/rubrics`
-- `agentic_core/eval_review.py`
+- `evalops/review.py`
   - dataset review list/apply
   - approve/reject case decisions
   - judge 人工 label 写入
   - 多人复核 agreement 统计
   - `--require-reviewed` integration through eval_harness
-- `agentic_core/eval_sampling.py`
+- `evalops/sampling.py`
   - review queue 生成
   - priority/reason 采样
   - `agentic_eval_review_queue` JSON 输出
-- `agentic_core/eval_diff.py`
+- `evalops/diff.py`
   - eval report JSON diff
   - metric/case/gate regression detection
   - `--fail-on-regression`
-- `agentic_core/eval_history.py`
+- `evalops/history.py`
   - append-only eval history JSONL
   - trend summary
   - latest-vs-previous regression hints
-- `agentic_core/eval_judge.py`
+- `evalops/judge.py`
   - `EvalJudgeInput`
   - `JudgeDecision`
   - `RuleBasedEvalJudge`
   - `LlmEvalJudge`
-- `agentic_core/eval_judge_registry.py`
+- `evalops/judge_registry.py`
   - judge rubric registry
   - dataset rubric validation
   - CLI list/validate
@@ -464,12 +514,12 @@ eval harness: 8/8 passed, Gate PASS
 
 | 阶段 | 当前状态 | 证据强度 | 完整生产缺口 |
 | --- | --- | --- | --- |
-| Typed State | 已完成学习版 + payload schema | 强 | schema migration / Pydantic/msgspec |
-| SafetyPolicy | 生产化骨架 | 强 | 外部 moderation / 人审 |
-| Tool Metadata | 已接入治理 | 强 | JSON Schema / owner / SLA |
-| Middleware Pipeline | 生产化学习版 | 强 | OTel / 跨进程 budget / 持久幂等 |
-| Persistent Event Log | 本地 JSONL + SQLite + payloadSchema | 强 | Postgres / ClickHouse / OTel / deterministic replay |
-| Memory Lifecycle | `MemoryLifecyclePolicy` 单一策略源 + user/tenant namespace + memory_admin CLI + conflict resolution | 强 | embedding / review UI/API / 外部化租户级策略 |
+| Typed State | 已完成学习版 + payload schema + payload migration | 强 | Pydantic/msgspec 强运行时校验 |
+| SafetyPolicy | 生产化骨架 + 本地 SafetyReviewQueue | 强 | 外部 moderation / 协作式人审平台 / 租户策略中心 |
+| Tool Metadata | 已接入治理 + JSON Schema 子集导出 + owner/SLA/classification + lifecycle migration 校验 | 强 | OpenAPI 级目录 / 服务目录集成 |
+| Middleware Pipeline | 生产化学习版 + JSON/SQLite budget/idempotency store + OTel-style tool span sink + OTLP/HTTP exporter | 强 | 官方 OTel SDK/采样/上下文传播 / Redis/Postgres budget 与幂等 |
+| Persistent Event Log | 本地 JSONL + SQLite + payloadSchema + payload migration | 强 | Postgres / ClickHouse / OTel / deterministic replay |
+| Memory Lifecycle | `MemoryLifecyclePolicy` 单一策略源 + JSON 策略配置 + user/tenant namespace + memory_admin CLI/API + conflict resolution + 本地 embedding search | 强 | 真实 embedding/向量库 / 协作审核 UI / 集中式租户级策略服务 |
 | Evals | 确定性 gate + dashboard + 带本地 RBAC、signed claims token、tenant policy JSON、review state、review decisions 分页 API、review 写入 API、SQLite review store 和审计事件的 governance server + replay bundle + dataset review + review queue + agreement + judge registry + judge label 校准 + report diff + history + judge 骨架 | 强 | 线上回放平台 / 协作标注平台 / OIDC/JWT provider 与集中式策略中心 |
 
 ## 结论
@@ -480,9 +530,9 @@ eval harness: 8/8 passed, Gate PASS
 
 1. 真实用户/租户认证授权系统(OIDC/JWT provider/session/集中式策略中心;当前只到本地静态 token + signed claims token + tenant policy JSON + scope RBAC)。
 2. 数据库后端(Postgres/SQLite/ClickHouse/OTel)。
-3. 外部 moderation + human review。
-4. embedding memory 后端。
-5. OTel tracing。
+3. 外部 moderation + 协作式 human review。
+4. 真实 embedding memory 后端和向量数据库。
+5. 官方 OTel SDK、采样和跨组件上下文传播。
 6. 线上数据回放 eval。
 
 因此本审计不建议把总目标标记为“最终完成”。建议继续按上述生产缺口推进下一阶段。

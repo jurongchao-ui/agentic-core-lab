@@ -32,6 +32,10 @@ from agentic_core.policies.memory import SENSITIVE_PATTERN
 
 SideEffect = Literal["read", "write"]
 RiskLevel = Literal["low", "medium", "high"]
+DataClassification = Literal["public", "internal", "confidential", "restricted"]
+AuditClassification = Literal["none", "standard", "sensitive", "financial"]
+SlaTier = Literal["local", "best_effort", "standard", "critical"]
+ToolLifecycleStatus = Literal["active", "deprecated", "removed"]
 
 
 @dataclass
@@ -56,6 +60,16 @@ class ToolSpec:
     risk_level: RiskLevel = "low"
     requires_approval: bool = False
     version: str = "1.0"
+    owner: str = "agentic-core"
+    sla_tier: SlaTier = "local"
+    data_classification: DataClassification = "internal"
+    audit_classification: AuditClassification = "standard"
+    external_side_effect: bool = False
+    lifecycle_status: ToolLifecycleStatus = "active"
+    introduced_in: str = "1.0"
+    deprecated_in: str | None = None
+    replaced_by: str | None = None
+    migration_notes: str | None = None
 
     def to_public_dict(self) -> dict[str, Any]:
         """返回给 Planner/审计系统看的工具元数据。"""
@@ -64,6 +78,7 @@ class ToolSpec:
             "name": self.name,
             "description": self.description,
             "inputSchema": self.input_schema,
+            "inputJsonSchema": input_schema_to_json_schema(self.input_schema),
             "sideEffect": self.side_effect,
             "permissionScope": self.permission_scope,
             "timeoutMs": self.timeout_ms,
@@ -73,7 +88,22 @@ class ToolSpec:
             "requiresApproval": self.requires_approval,
             "guardSensitive": self.guard_sensitive,
             "version": self.version,
+            "owner": self.owner,
+            "slaTier": self.sla_tier,
+            "dataClassification": self.data_classification,
+            "auditClassification": self.audit_classification,
+            "externalSideEffect": self.external_side_effect,
+            "lifecycleStatus": self.lifecycle_status,
+            "introducedIn": self.introduced_in,
+            "deprecatedIn": self.deprecated_in,
+            "replacedBy": self.replaced_by,
+            "migrationNotes": self.migration_notes,
         }
+
+    def input_json_schema(self) -> dict[str, Any]:
+        """返回标准 JSON Schema 子集,供外部治理/文档系统使用。"""
+
+        return input_schema_to_json_schema(self.input_schema)
 
 
 class ToolRegistry:
@@ -108,7 +138,52 @@ class ToolRegistry:
         只暴露 name / description / inputSchema,不暴露 Python 函数本身。
         inputSchema 是本工具参数的唯一真相源: planner 的 prompt 提示和参数校验都从这里派生。
         """
-        return [spec.to_public_dict() for spec in self._tools.values()]
+        return [
+            spec.to_public_dict()
+            for spec in self._tools.values()
+            if spec.lifecycle_status != "removed"
+        ]
+
+    def catalog(self) -> dict[str, Any]:
+        """返回完整工具目录。
+
+        与 list() 不同,catalog 会包含 removed 工具,用于审计、迁移和文档。
+        """
+
+        return {
+            "schemaVersion": 1,
+            "type": "agentic_tool_catalog",
+            "tools": [spec.to_public_dict() for spec in self._tools.values()],
+        }
+
+    def validate_catalog(self) -> dict[str, Any]:
+        """校验工具目录迁移元数据。
+
+        生产里工具不能只是“突然消失”。deprecated/removed 工具必须说明替代工具和迁移说明。
+        """
+
+        errors: list[str] = []
+        for spec in self._tools.values():
+            if not spec.version:
+                errors.append(f"{spec.name}: version is required")
+            if not spec.owner:
+                errors.append(f"{spec.name}: owner is required")
+            if spec.lifecycle_status in {"deprecated", "removed"}:
+                if not spec.replaced_by:
+                    errors.append(f"{spec.name}: {spec.lifecycle_status} tool must set replacedBy")
+                elif spec.replaced_by not in self._tools:
+                    errors.append(f"{spec.name}: replacedBy points to unknown tool: {spec.replaced_by}")
+                if not spec.migration_notes:
+                    errors.append(f"{spec.name}: {spec.lifecycle_status} tool must set migrationNotes")
+            if spec.lifecycle_status == "deprecated" and not spec.deprecated_in:
+                errors.append(f"{spec.name}: deprecated tool must set deprecatedIn")
+        return {
+            "schemaVersion": 1,
+            "type": "agentic_tool_catalog_validation",
+            "valid": not errors,
+            "toolCount": len(self._tools),
+            "errors": errors,
+        }
 
     def has(self, name: str) -> bool:
         """判断工具是否存在。"""
@@ -131,6 +206,8 @@ class ToolRegistry:
         tool = self._tools.get(name)
         if not tool:
             raise ValueError(f"unknown tool: {name}")
+        if tool.lifecycle_status == "removed":
+            raise ValueError(f"removed tool: {name}")
         data = input_data or {}
         # 写入类工具在执行前统一拦截敏感信息。这是所有工具调用的唯一入口,
         # 不管 planner 是规则还是 LLM 都绕不过——敏感信息不落地,不依赖走的是哪条路。
@@ -153,6 +230,16 @@ class ToolRegistry:
         risk_level: RiskLevel = "low",
         requires_approval: bool = False,
         version: str = "1.0",
+        owner: str = "agentic-core",
+        sla_tier: SlaTier = "local",
+        data_classification: DataClassification = "internal",
+        audit_classification: AuditClassification = "standard",
+        external_side_effect: bool = False,
+        lifecycle_status: ToolLifecycleStatus = "active",
+        introduced_in: str = "1.0",
+        deprecated_in: str | None = None,
+        replaced_by: str | None = None,
+        migration_notes: str | None = None,
     ) -> None:
         """注册一个工具。
 
@@ -175,6 +262,16 @@ class ToolRegistry:
             risk_level=risk_level,
             requires_approval=requires_approval,
             version=version,
+            owner=owner,
+            sla_tier=sla_tier,
+            data_classification=data_classification,
+            audit_classification=audit_classification,
+            external_side_effect=external_side_effect,
+            lifecycle_status=lifecycle_status,
+            introduced_in=introduced_in,
+            deprecated_in=deprecated_in,
+            replaced_by=replaced_by,
+            migration_notes=migration_notes,
         )
 
     def _register_defaults(self) -> None:
@@ -207,6 +304,7 @@ class ToolRegistry:
             timeout_ms=1000,
             cost_units=2,
             risk_level="medium",
+            audit_classification="sensitive",
         )
         self._register(
             "todo.add",
@@ -219,6 +317,7 @@ class ToolRegistry:
             timeout_ms=1000,
             cost_units=2,
             risk_level="medium",
+            audit_classification="sensitive",
         )
         self._register(
             "todo.list",
@@ -249,6 +348,7 @@ class ToolRegistry:
             timeout_ms=1000,
             cost_units=2,
             risk_level="medium",
+            audit_classification="sensitive",
         )
 
     def _memory_add(self, input_data: dict[str, Any]) -> dict[str, Any]:
@@ -329,6 +429,35 @@ def _coerce_positive_int(value: Any, default: int) -> int:
 def _default_permission_scope(name: str, side_effect: SideEffect) -> str:
     operation = "write" if side_effect == "write" else "read"
     return f"tool:{name}:{operation}"
+
+
+def input_schema_to_json_schema(input_schema: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    """把学习版 input_schema 转成 JSON Schema 子集。
+
+    旧的 input_schema 仍是 planner 校验的单一真相源。这里做只读转换,
+    避免让外部文档/治理系统依赖项目自定义格式。
+    """
+
+    properties: dict[str, dict[str, Any]] = {}
+    required: list[str] = []
+    for field_name, field_spec in input_schema.items():
+        field_schema = {
+            key: value
+            for key, value in field_spec.items()
+            if key != "required"
+        }
+        field_schema.setdefault("type", "string")
+        properties[field_name] = field_schema
+        if bool(field_spec.get("required", False)):
+            required.append(field_name)
+    schema: dict[str, Any] = {
+        "type": "object",
+        "properties": properties,
+        "additionalProperties": False,
+    }
+    if required:
+        schema["required"] = required
+    return schema
 
 
 def safe_eval_arithmetic(expression: str) -> int | float:

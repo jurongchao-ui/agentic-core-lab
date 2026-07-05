@@ -21,8 +21,11 @@ MemoryPolicy 决定“要不要保存”,MemoryStore 决定“存在哪里”。
 
 from __future__ import annotations
 
+import argparse
+import json
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 from agentic_core.runtime.schemas import MemoryRecord
@@ -54,6 +57,66 @@ class MemoryLifecyclePolicy:
             "long_term_note": 10,
         }
     )
+
+    @classmethod
+    def from_file(cls, path: str | Path) -> "MemoryLifecyclePolicy":
+        """从 JSON 文件加载生命周期策略。
+
+        文件格式是增量配置:只写需要覆盖的字段,未写字段继续使用默认值。
+        """
+
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError("memory lifecycle policy file must be a JSON object")
+        return cls.from_dict(data)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "MemoryLifecyclePolicy":
+        """从 dict 构造策略,用于测试、JSON 配置和未来策略中心。"""
+
+        schema_version = data.get("schemaVersion", 1)
+        if schema_version != 1:
+            raise ValueError("memory lifecycle policy schemaVersion must be 1")
+
+        defaults = cls()
+        task_memory_ttl_days = _optional_int(data.get("taskMemoryTtlDays"), defaults.task_memory_ttl_days)
+        if task_memory_ttl_days < 0:
+            raise ValueError("taskMemoryTtlDays must be >= 0")
+
+        raw_positive_score_keys = data.get("positiveScoreKeys")
+        if raw_positive_score_keys is None:
+            positive_score_keys = defaults.positive_score_keys
+        elif isinstance(raw_positive_score_keys, list) and all(isinstance(item, str) for item in raw_positive_score_keys):
+            positive_score_keys = tuple(raw_positive_score_keys)
+        else:
+            raise ValueError("positiveScoreKeys must be a list of strings")
+
+        type_importance_boosts = dict(defaults.type_importance_boosts)
+        raw_boosts = data.get("typeImportanceBoosts")
+        if raw_boosts is not None:
+            if not isinstance(raw_boosts, dict):
+                raise ValueError("typeImportanceBoosts must be an object")
+            for memory_type, raw_boost in raw_boosts.items():
+                if not isinstance(memory_type, str) or not memory_type:
+                    raise ValueError("typeImportanceBoosts keys must be non-empty strings")
+                boost = _optional_int(raw_boost, default=-1)
+                if boost < 0:
+                    raise ValueError(f"typeImportanceBoosts.{memory_type} must be >= 0")
+                type_importance_boosts[memory_type] = boost
+
+        return cls(
+            task_memory_ttl_days=task_memory_ttl_days,
+            positive_score_keys=positive_score_keys,
+            type_importance_boosts=type_importance_boosts,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schemaVersion": 1,
+            "taskMemoryTtlDays": self.task_memory_ttl_days,
+            "positiveScoreKeys": list(self.positive_score_keys),
+            "typeImportanceBoosts": dict(self.type_importance_boosts),
+        }
 
     def normalize_text(self, text: str) -> str:
         """规范化正文,用于精确去重和 exact conflict key。"""
@@ -158,3 +221,106 @@ def _optional_int(value: Any, default: int = 0) -> int:
 
 
 DEFAULT_MEMORY_LIFECYCLE_POLICY = MemoryLifecyclePolicy()
+
+
+def load_memory_lifecycle_policy(path: str | Path | None = None) -> MemoryLifecyclePolicy:
+    """加载策略。path 为空时返回默认策略。"""
+
+    if path is None:
+        return DEFAULT_MEMORY_LIFECYCLE_POLICY
+    return MemoryLifecyclePolicy.from_file(path)
+
+
+def validate_memory_lifecycle_policy_file(path: str | Path) -> dict[str, Any]:
+    """校验策略文件,返回适合 CLI/CI 使用的结构化报告。"""
+
+    try:
+        policy = MemoryLifecyclePolicy.from_file(path)
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        return {
+            "schemaVersion": 1,
+            "type": "agentic_memory_lifecycle_policy_validation",
+            "path": str(Path(path)),
+            "valid": False,
+            "errors": [str(exc)],
+        }
+    return {
+        "schemaVersion": 1,
+        "type": "agentic_memory_lifecycle_policy_validation",
+        "path": str(Path(path)),
+        "valid": True,
+        "errors": [],
+        "policy": policy.to_dict(),
+    }
+
+
+def format_memory_lifecycle_policy(policy: MemoryLifecyclePolicy, path: str | Path | None = None) -> str:
+    """格式化策略,供人读 CLI 输出使用。"""
+
+    title = "Memory Lifecycle Policy"
+    if path is not None:
+        title = f"{title}: {path}"
+    lines = [
+        title,
+        f"- taskMemoryTtlDays: {policy.task_memory_ttl_days}",
+        f"- positiveScoreKeys: {', '.join(policy.positive_score_keys)}",
+        "- typeImportanceBoosts:",
+    ]
+    for memory_type, boost in sorted(policy.type_importance_boosts.items()):
+        lines.append(f"  - {memory_type}: {boost}")
+    return "\n".join(lines)
+
+
+def format_policy_validation(report: dict[str, Any]) -> str:
+    """格式化策略校验报告。"""
+
+    lines = [
+        "Memory Lifecycle Policy Validation",
+        f"- path: {report.get('path', '')}",
+        f"- valid: {report.get('valid', False)}",
+    ]
+    errors = report.get("errors")
+    if isinstance(errors, list) and errors:
+        lines.append("- errors:")
+        for error in errors:
+            lines.append(f"  - {error}")
+    return "\n".join(lines)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Inspect and validate memory lifecycle policy")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    show_parser = subparsers.add_parser("show", help="显示默认或指定的长期记忆生命周期策略")
+    show_parser.add_argument("--path", help="memory lifecycle policy JSON 路径")
+    show_parser.add_argument("--json", action="store_true", help="输出 JSON")
+
+    validate_parser = subparsers.add_parser("validate", help="校验长期记忆生命周期策略 JSON")
+    validate_parser.add_argument("--path", required=True, help="memory lifecycle policy JSON 路径")
+    validate_parser.add_argument("--json", action="store_true", help="输出 JSON")
+
+    args = parser.parse_args(argv)
+    if args.command == "show":
+        policy = load_memory_lifecycle_policy(args.path)
+        data = {
+            "schemaVersion": 1,
+            "type": "agentic_memory_lifecycle_policy",
+            "path": args.path,
+            "policy": policy.to_dict(),
+        }
+        if args.json:
+            print(json.dumps(data, ensure_ascii=False, indent=2))
+        else:
+            print(format_memory_lifecycle_policy(policy, args.path))
+        return 0
+
+    report = validate_memory_lifecycle_policy_file(args.path)
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+    else:
+        print(format_policy_validation(report))
+    return 0 if report["valid"] else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -10,6 +10,27 @@ AGENTIC_PLANNER=hermes|rule
 AGENTIC_MEMORY_POLICY=llm|rule
 AGENTIC_SAFETY_POLICY=rule|llm|composite
 AGENTIC_SAFETY_FAIL_CLOSED=1|0
+AGENTIC_SAFETY_REVIEW_QUEUE=memory|jsonl
+AGENTIC_SAFETY_REVIEW_QUEUE_PATH=data/safety-review-queue.jsonl
+AGENTIC_TOOL_BUDGET_STORE=memory|json|sqlite
+AGENTIC_TOOL_BUDGET_PATH=data/tool-budgets.json  # sqlite 时可用 data/tool-runtime.db
+AGENTIC_TOOL_BUDGET_LOCK=1|0
+AGENTIC_IDEMPOTENCY_STORE=memory|json|sqlite
+AGENTIC_IDEMPOTENCY_PATH=data/tool-idempotency.json  # sqlite 时可用 data/tool-runtime.db
+AGENTIC_IDEMPOTENCY_LOCK=1|0
+AGENTIC_TOOL_TRACE_SINK=memory|jsonl|otlp_http
+AGENTIC_TOOL_TRACE_PATH=data/tool-spans.jsonl
+AGENTIC_TOOL_TRACE_LOCK=1|0
+AGENTIC_TOOL_TRACE_ENDPOINT=http://localhost:4318/v1/traces
+AGENTIC_TOOL_TRACE_TIMEOUT_MS=1000
+AGENTIC_TOOL_TRACE_HEADERS={"Authorization":"Bearer ..."}
+AGENTIC_SERVICE_NAME=agentic-core-lab
+AGENTIC_SERVICE_VERSION=0.1.0
+AGENTIC_DEPLOYMENT_ENVIRONMENT=local
+AGENTIC_MEMORY_REVIEW_HOST=127.0.0.1
+AGENTIC_MEMORY_REVIEW_PORT=8770
+AGENTIC_MEMORY_REVIEW_PATH=data/memory.json
+AGENTIC_MEMORY_REVIEW_TOKEN=local-secret
 ```
 
 身份上下文:
@@ -33,6 +54,19 @@ AGENTIC_CHAT_DEBUG=1
 ```text
 AGENTIC_MEMORY_STORE=memory|json
 AGENTIC_MEMORY_PATH=data/memory.json
+AGENTIC_MEMORY_LIFECYCLE_POLICY_PATH=data/memory-lifecycle-policy.json
+```
+
+`AGENTIC_MEMORY_LIFECYCLE_POLICY_PATH` 可外部化长期记忆生命周期策略。配置是增量覆盖,未写字段沿用默认值:
+
+```json
+{
+  "schemaVersion": 1,
+  "taskMemoryTtlDays": 7,
+  "typeImportanceBoosts": {
+    "user_profile": 80
+  }
+}
 ```
 
 事件日志:
@@ -74,11 +108,59 @@ AGENTIC_MEMORY_STORE=json AGENTIC_EVENT_LOG=jsonl \
   python3 -m agentic_core.chat
 ```
 
+自定义长期记忆生命周期策略:
+
+```bash
+AGENTIC_MEMORY_LIFECYCLE_POLICY_PATH=data/memory-lifecycle-policy.json \
+  python3 -m agentic_core.chat
+```
+
+查看/校验长期记忆生命周期策略:
+
+```bash
+python3 -m agentic_core.memory.lifecycle show
+python3 -m agentic_core.memory.lifecycle show --path data/memory-lifecycle-policy.json --json
+python3 -m agentic_core.memory.lifecycle validate --path data/memory-lifecycle-policy.json
+```
+
+启动长期记忆审核 API:
+
+```bash
+AGENTIC_MEMORY_REVIEW_TOKEN=local-secret \
+python3 -m agentic_core.memory.server --path data/memory.json --port 8770
+```
+
+示例接口:
+
+```bash
+curl -H "Authorization: Bearer local-secret" \
+  "http://127.0.0.1:8770/api/memories?userId=local_user&tenantId=default_tenant"
+
+curl -X POST -H "Authorization: Bearer local-secret" -H "Content-Type: application/json" \
+  -d '{"memoryId":"memory_1","reason":"人工审核归档"}' \
+  http://127.0.0.1:8770/api/memories/archive
+```
+
 SQLite 事件日志:
 
 ```bash
 AGENTIC_EVENT_LOG=sqlite AGENTIC_EVENT_LOG_PATH=data/events.db \
   python3 -m agentic_core.chat
+```
+
+工具调用 span JSONL:
+
+```bash
+AGENTIC_TOOL_TRACE_SINK=jsonl AGENTIC_TOOL_TRACE_PATH=data/tool-spans.jsonl \
+  python3 -m agentic_core.cli "帮我计算 128 * 7"
+```
+
+工具调用 span 发送到 OTLP/HTTP Collector:
+
+```bash
+AGENTIC_TOOL_TRACE_SINK=otlp_http \
+AGENTIC_TOOL_TRACE_ENDPOINT=http://localhost:4318/v1/traces \
+  python3 -m agentic_core.cli "帮我计算 128 * 7"
 ```
 
 限制当前身份只能调用 calculator:
@@ -127,6 +209,7 @@ python3 -m agentic_core.observability.event_log --backend sqlite --path data/eve
 
 - 长期记忆不保存密码、密钥、证件号等。
 - `note.add`、`todo.add`、`memory.add` 复用同一份 `SENSITIVE_PATTERN`。
+- `ToolOutputSafetyMiddleware` 会净化工具输出和错误中的敏感字段/文本。
 - 事件日志写入前会脱敏。
 
 ## 运行时产物
@@ -135,8 +218,13 @@ python3 -m agentic_core.observability.event_log --backend sqlite --path data/eve
 
 ```text
 data/memory.json
+data/tool-budgets.json
+data/tool-idempotency.json
+data/tool-runtime.db
+data/tool-spans.jsonl
 data/*.jsonl
 data/*.jsonl.lock
+data/*.db
 ```
 
 它们已经由 `.gitignore` 管理。

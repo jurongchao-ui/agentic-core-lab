@@ -61,6 +61,16 @@ python3 -m agentic_core.memory.admin conflicts --path data/memory.json --user-id
 python3 -m agentic_core.memory.admin resolve-conflict --path data/memory.json --keep-memory-id memory_2 --reason "保留最新长期记忆"
 ```
 
+启动长期记忆审核 API:
+
+```bash
+AGENTIC_MEMORY_REVIEW_TOKEN=local-secret \
+python3 -m agentic_core.memory.server --path data/memory.json --port 8770
+```
+python3 -m agentic_core.memory.admin resolve-conflict --path data/memory.json --keep-memory-id memory_2 --reason "保留最新长期记忆"
+python3 -m agentic_core.memory.lifecycle validate --path data/memory-lifecycle-policy.json
+```
+
 启动只读本地 eval 治理服务:
 
 ```bash
@@ -126,21 +136,21 @@ python3 -m evalops.governance.server --dataset data/eval-dataset.json --review-o
 - Typed State 主链路,`Agent.run_typed()` 返回 `AgentRunResult`。
 - CLI 单轮运行和 Chat 连续对话。
 - 规则版与 LLM 版 MemoryPolicy,敏感信息一票否决。
-- Memory Lifecycle: `MemoryLifecyclePolicy` 单一策略源、active/archived、user/tenant namespace、memory_admin 审核维护 CLI、冲突检测/解决、访问统计、重要性、过期归档、规则语义合并。
+- Memory Lifecycle: `MemoryLifecyclePolicy` 单一策略源、JSON 策略配置、active/archived、user/tenant namespace、memory_admin 审核维护 CLI、memory review API、冲突检测/解决、访问统计、重要性、过期归档、规则语义合并、本地 hashing embedding 检索。
 - JSON 记忆持久化。
-- RuleBased / LLM / Composite SafetyPolicy。
+- RuleBased / LLM / Composite SafetyPolicy + 本地 SafetyReviewQueue。
 - ResponsePolicy 最终回复仲裁。
 - RuntimeIdentity: user/tenant/roles/permission scopes 学习版身份上下文。
-- ToolSpec 治理元数据 + ToolGovernancePolicy。
-- MiddlewarePipeline: approval、cost、timeout、retry、idempotency、tracing metadata。
-- Event payload schema: typed payload dataclass + 写入前 payloadSchema 校验。
+- ToolSpec 治理元数据、JSON Schema 子集导出、版本迁移校验 + ToolGovernancePolicy。
+- MiddlewarePipeline: approval、cost budget、JSON/SQLite budget store、timeout、retry、write-tool idempotency、JSON/SQLite idempotency store、tool-output safety、OTel-style tool span sink、OTLP/HTTP exporter。
+- Event payload schema: typed payload dataclass + schema migration + 写入前 payloadSchema 校验。
 - EventWriter 抽象 + JSONL/SQLite 持久事件日志、脱敏、轮转、文件锁、备份读取。
 - Eval Harness: 8 个确定性用例、本地治理 dashboard、带 viewer/reviewer RBAC、signed claims token、tenant policy JSON、本地静态 token、受保护 review 写入 API、review status API、review decisions 分页 API、SQLite review store 和 JSONL 审计事件的 governance server、replay inspection bundle、dataset 审核、复核队列采样、多人复核状态/一致性统计、judge registry/version 治理、judge 人工 label 校准、event-log-to-eval 草稿、报告 diff、历史趋势、rule/LLM judge、指标、事件计数和质量门禁。
 
 ## 当前验收状态
 
 ```text
-pytest: 275 passed
+pytest: 330 passed
 mypy: success
 compileall: passed
 eval harness: 8/8 passed, Gate PASS

@@ -83,7 +83,7 @@ agentic_core/
 - `mergedFrom`: 规则语义合并保留历史文本。
 - `accessCount` / `lastAccessedAt`: snapshot 给 planner 时更新。
 
-当前语义合并和冲突检测是规则版,覆盖技术栈和学习时长偏好。`MemoryStore` 和 `memory_admin` 共用同一个 `MemoryLifecyclePolicy`,生产可替换为 embedding/向量库、数据库唯一键或租户级策略中心。
+当前语义合并和冲突检测是规则版,覆盖技术栈和学习时长偏好。`MemoryStore` 和 `memory_admin` 共用同一个 `MemoryLifecyclePolicy`,并可通过 `AGENTIC_MEMORY_LIFECYCLE_POLICY_PATH` 从 JSON 增量覆盖 TTL、positive score keys 和 type importance boosts。`memory/embedding.py` 提供本地 `HashingMemoryEmbeddingIndex`,让 snapshot 可按当前 goal 做相似度排序;生产可继续替换为真实 embedding/向量库、数据库唯一键或租户级策略中心。
 
 `memory_admin.py` 提供本地审核维护入口:
 
@@ -92,6 +92,16 @@ agentic_core/
 - 手动调整 `importance`,影响 retention 排序。
 - 查看 active 长期记忆冲突组,例如技术栈、学习时长偏好的多版本冲突。
 - 解决冲突时保留一条记忆,软归档同组其他记忆。
+
+`memory/server.py` 在同一套治理函数上提供标准库 HTTP API:
+
+- `GET /api/memories`: 按 namespace 查看长期记忆。
+- `GET /api/memories/conflicts`: 查看冲突组。
+- `POST /api/memories/archive`: 归档记忆。
+- `POST /api/memories/importance`: 调整 importance。
+- `POST /api/memories/resolve-conflict`: 解决冲突。
+
+写接口必须配置 Bearer token,避免本地服务误暴露后被无认证修改记忆。
 
 ## Safety
 
@@ -116,6 +126,9 @@ agentic_core/
 - `refuse`
 
 当前 `review/refuse` 会阻断整轮。
+当 action 为 `review` 时,Agent 会把请求写入 `SafetyReviewQueue`,
+并记录 `safety_review_queued` 事件。默认队列是进程内存版;设置
+`AGENTIC_SAFETY_REVIEW_QUEUE=jsonl` 可追加写入本地 JSONL。
 
 ## Tool Governance
 
@@ -139,13 +152,31 @@ CLI/Chat 可从环境变量构造身份。AgentRunResult、run events、tool obs
 - `requiresApproval`
 - `guardSensitive`
 - `version`
+- `owner`
+- `slaTier`
+- `dataClassification`
+- `auditClassification`
+- `externalSideEffect`
+- `inputJsonSchema`
+- `lifecycleStatus`
+- `introducedIn`
+- `deprecatedIn`
+- `replacedBy`
+- `migrationNotes`
+
+`inputSchema` 仍是 planner 参数校验的单一真相源;`inputJsonSchema` 是只读导出,
+用于外部治理、文档和后续 schema 标准化。
+
+`ToolRegistry.catalog()` 会导出完整工具目录,包含已 removed 的历史工具;
+`ToolRegistry.validate_catalog()` 会检查 deprecated/removed 工具必须声明替代工具和迁移说明。
+`ToolRegistry.list()` 不会把 removed 工具暴露给 planner。
 
 工具执行统一经过 `MiddlewarePipeline.execute_tool()`:
 
 ```text
 ToolGovernanceMiddleware
   -> CostAccountingMiddleware
-  -> timeout/retry/idempotency/tracing
+  -> timeout/retry/write-tool idempotency/tool-output safety/tracing
 ```
 
 `ToolGovernancePolicy` 支持:
@@ -155,6 +186,31 @@ ToolGovernanceMiddleware
 - 按 risk level 要求审批。
 - 按 side effect 要求审批。
 - 每个 tenant + run 的 cost budget。
+
+`ToolGovernanceMiddleware` 带可注入 `ToolBudgetStore`。默认 `InMemoryToolBudgetStore`
+保持轻量;设置 `AGENTIC_TOOL_BUDGET_STORE=json` 可使用 `JsonFileToolBudgetStore`,
+让同一台机器上的 CLI/chat 进程共享 tenant+run 预算;设置
+`AGENTIC_TOOL_BUDGET_STORE=sqlite` 可使用 `SQLiteToolBudgetStore`,用 SQLite 事务保护
+预算 reserve 的读改写过程。
+
+`MiddlewarePipeline` 带可注入 `IdempotencyStore`。默认 `InMemoryIdempotencyStore`
+只缓存成功的 write 工具结果;设置 `AGENTIC_IDEMPOTENCY_STORE=json` 可使用
+`JsonFileIdempotencyStore`,让同机 CLI/chat 进程共享 write 工具幂等结果;设置
+`AGENTIC_IDEMPOTENCY_STORE=sqlite` 可使用 `SQLiteIdempotencyStore`,把已脱敏的
+Observation JSON 保存进 SQLite。
+read 工具不缓存,失败 write 不缓存,idempotency key 包含 run、step、tool、input、
+tool version、user 和 tenant,避免不同身份误命中。
+
+`ToolOutputSafetyMiddleware` 会在工具执行后递归净化 `Observation.output/error`,
+复用同一份 `SENSITIVE_PATTERN`,防止敏感工具输出进入最终回复、trace 或事件。
+
+`MiddlewarePipeline` 还带可注入 `ToolTraceSink`。默认 `InMemoryToolTraceSink`
+只在进程内保留 span;设置 `AGENTIC_TOOL_TRACE_SINK=jsonl` 可使用
+`JsonlToolTraceSink` 追加写入 `data/tool-spans.jsonl`;设置
+`AGENTIC_TOOL_TRACE_SINK=otlp_http` 可使用 `OtlpHttpToolTraceSink` POST 到
+OTLP/HTTP collector 的 `/v1/traces`。span 使用 OTel-style
+字段(`traceId/spanId/parentSpanId/status/attributes`),覆盖成功、工具失败、审批短路
+和幂等命中等路径。span 只保存治理元数据和状态,不保存工具输入/输出,避免形成第二份敏感数据副本。
 
 每次工具结果都会把审计信息写入 `Observation.metadata`。
 
@@ -193,8 +249,9 @@ normal_responder
 
 - `event_payloads.py` 定义每种事件的 required fields。
 - Agent 主链路使用 typed payload dataclass 发事件,减少裸 dict。
-- `MemoryStore.record_event()` 写入前校验 payload,并在事件里写入 `payloadSchema`。
-- 旧 dict 调用仍兼容;缺字段时不打断主流程,但 `payloadSchema.valid=false` 会留下审计证据。
+- `MemoryStore.record_event()` 写入前先做 payload schema migration,再校验 payload,并在事件里写入 `payloadSchema`。
+- 旧 dict 调用仍兼容;能识别的旧扁平格式会迁成当前结构,缺字段时不打断主流程,但 `payloadSchema.valid=false` 会留下审计证据。
+- `JsonMemoryStore` 读取旧 v1 事件时也会迁移 payload,并在 `payloadSchema.migrationsApplied` 留下迁移证据。
 
 JSONL 后端特性:
 
