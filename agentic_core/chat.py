@@ -32,6 +32,8 @@ from agentic_core.policies.planner import HermesPlanner, RuleBasedPlanner
 from agentic_core.policies.responder import LlmResponder
 from agentic_core.runtime.context import build_runtime_identity_from_env
 from agentic_core.policies.safety import build_safety_policy_from_env
+from agentic_core.policies.safety_review import build_safety_review_queue_from_env
+from agentic_core.tools.middleware import build_middleware_pipeline_from_env
 from agentic_core.tools.registry import ToolRegistry
 from agentic_core.observability.trace_view import format_run_brief, format_run_json, resolve_trace_mode
 
@@ -74,6 +76,8 @@ def build_agent() -> Agent:
         memory_policy=memory_policy,
         responder=responder,
         safety_policy=build_safety_policy_from_env(model=model),
+        safety_review_queue=build_safety_review_queue_from_env(),
+        middleware_pipeline=build_middleware_pipeline_from_env(),
         identity=build_runtime_identity_from_env(),
     )
 

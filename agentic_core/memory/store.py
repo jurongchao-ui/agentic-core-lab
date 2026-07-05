@@ -25,13 +25,19 @@ from pathlib import Path
 from typing import Any
 
 from agentic_core.observability.event_writer import EventWriter, build_event_writer_from_env, redact_event
-from agentic_core.observability.event_payloads import EventPayloadInput, payload_to_dict, validate_event_payload
+from agentic_core.observability.event_payloads import (
+    EventPayloadInput,
+    migrate_event_payload,
+    payload_to_dict,
+    validate_event_payload,
+)
 from agentic_core.memory.lifecycle import (
     DEFAULT_MEMORY_LIFECYCLE_POLICY,
     MemoryLifecyclePolicy,
     clamp_int,
     parse_iso,
 )
+from agentic_core.memory.embedding import HashingMemoryEmbeddingIndex, MemoryEmbeddingIndex
 from agentic_core.runtime.schemas import EventRecord, MemoryRecord, MemorySnapshot, MemoryStatus, NoteRecord, TodoRecord
 
 
@@ -59,10 +65,12 @@ class MemoryStore:
         default_user_id: str = "local_user",
         default_tenant_id: str = "default_tenant",
         lifecycle_policy: MemoryLifecyclePolicy | None = None,
+        embedding_index: MemoryEmbeddingIndex | None = None,
     ) -> None:
         self.default_user_id = default_user_id
         self.default_tenant_id = default_tenant_id
         self.lifecycle_policy = lifecycle_policy or DEFAULT_MEMORY_LIFECYCLE_POLICY
+        self.embedding_index = embedding_index or HashingMemoryEmbeddingIndex()
 
         # 普通学习笔记,由 note.add 工具写入。
         self.notes: list[NoteRecord] = []
@@ -238,6 +246,26 @@ class MemoryStore:
             if memory.status == "active" and _memory_in_namespace(memory, user_id, tenant_id)
         ]
 
+    def search_long_term_memories(
+        self,
+        query: str,
+        user_id: str | None = None,
+        tenant_id: str | None = None,
+        limit: int | None = None,
+        min_score: float = 0.0,
+        touch: bool = False,
+    ) -> list[MemoryRecord]:
+        """按 query 相似度检索 active 长期记忆。
+
+        这是本地 embedding 边界:MemoryStore 不关心底层是 hashing、pgvector 还是外部向量库。
+        """
+
+        active_memories = self.list_active_long_term_memories(user_id=user_id, tenant_id=tenant_id)
+        ranked = self.embedding_index.search(query, active_memories, limit=limit, min_score=min_score)
+        if touch:
+            return [self.touch_long_term_memory(memory.id) for memory in ranked]
+        return ranked
+
     def archive_expired_long_term_memories(self, now: str | None = None) -> list[MemoryRecord]:
         """归档已经过期的长期记忆。
 
@@ -329,11 +357,28 @@ class MemoryStore:
         新调用推荐显式传 event_type/run_id/payload。
         """
         data = dict(event or {})
+        source_payload_schema_version = _payload_schema_version_if_present(data) if event else None
         event_type = event_type or str(data.pop("type", "event"))
         run_id = run_id or str(data.pop("runId", "unknown"))
         source = source or str(data.pop("source", _infer_event_source(event_type)))
         level = str(data.pop("level", level))
-        payload_data = payload_to_dict(payload if payload is not None else data)
+        data.pop("payloadSchema", None)
+        data.pop("payload_schema", None)
+        data.pop("schemaVersion", None)
+        data.pop("schema_version", None)
+        data.pop("createdAt", None)
+        data.pop("created_at", None)
+        data.pop("redacted", None)
+        if payload is None and isinstance(data.get("payload"), dict):
+            payload_data = payload_to_dict(data.pop("payload"))
+        else:
+            payload_data = payload_to_dict(payload if payload is not None else data)
+        migration = migrate_event_payload(
+            event_type,
+            payload_data,
+            source_schema_version=source_payload_schema_version,
+        )
+        payload_data = migration.payload
         payload_validation = validate_event_payload(event_type, payload_data)
         self._event_count += 1
         record = EventRecord(
@@ -347,6 +392,7 @@ class MemoryStore:
             payload_schema_version=payload_validation.schema_version,
             payload_schema_valid=payload_validation.valid,
             payload_schema_errors=list(payload_validation.errors),
+            payload_schema_migrations=list(migration.migrations_applied),
         )
         record = redact_event(record)
         self.event_writer.write(record)
@@ -357,10 +403,23 @@ class MemoryStore:
         touch_long_term: bool = False,
         user_id: str | None = None,
         tenant_id: str | None = None,
+        query: str | None = None,
+        max_long_term_memories: int | None = None,
+        min_relevance_score: float = 0.0,
     ) -> MemorySnapshot:
         """返回当前记忆快照,用于打印和传给 planner。"""
-        active_memories = self.list_active_long_term_memories(user_id=user_id, tenant_id=tenant_id)
-        if touch_long_term:
+        if query:
+            active_memories = self.search_long_term_memories(
+                query,
+                user_id=user_id,
+                tenant_id=tenant_id,
+                limit=max_long_term_memories,
+                min_score=min_relevance_score,
+                touch=touch_long_term,
+            )
+        else:
+            active_memories = self.list_active_long_term_memories(user_id=user_id, tenant_id=tenant_id)
+        if touch_long_term and not query:
             active_memories = [self.touch_long_term_memory(memory.id) for memory in active_memories]
         return MemorySnapshot(
             notes=list(self.notes),
@@ -382,9 +441,14 @@ class JsonMemoryStore(MemoryStore):
         path: str | Path = "data/memory.json",
         event_writer: EventWriter | None = None,
         lifecycle_policy: MemoryLifecyclePolicy | None = None,
+        embedding_index: MemoryEmbeddingIndex | None = None,
     ) -> None:
         self.path = Path(path)
-        super().__init__(event_writer=event_writer, lifecycle_policy=lifecycle_policy)
+        super().__init__(
+            event_writer=event_writer,
+            lifecycle_policy=lifecycle_policy,
+            embedding_index=embedding_index,
+        )
         self.load()
 
     def load(self) -> None:
@@ -511,13 +575,22 @@ def build_memory_store_from_env() -> MemoryStore:
     开启 JSON 持久化:
         AGENTIC_MEMORY_STORE=json
         AGENTIC_MEMORY_PATH=data/memory.json
+
+    可选外部化长期记忆生命周期策略:
+        AGENTIC_MEMORY_LIFECYCLE_POLICY_PATH=data/memory-lifecycle-policy.json
     """
 
     memory_store = os.getenv("AGENTIC_MEMORY_STORE", "memory").lower()
     memory_path = os.getenv("AGENTIC_MEMORY_PATH")
+    lifecycle_policy_path = os.getenv("AGENTIC_MEMORY_LIFECYCLE_POLICY_PATH")
+    lifecycle_policy = (
+        MemoryLifecyclePolicy.from_file(lifecycle_policy_path)
+        if lifecycle_policy_path
+        else DEFAULT_MEMORY_LIFECYCLE_POLICY
+    )
     if memory_store in {"json", "file", "persistent"} or memory_path:
-        return JsonMemoryStore(memory_path or "data/memory.json")
-    return MemoryStore()
+        return JsonMemoryStore(memory_path or "data/memory.json", lifecycle_policy=lifecycle_policy)
+    return MemoryStore(lifecycle_policy=lifecycle_policy)
 
 
 def _infer_event_source(event_type: str) -> str:
@@ -593,19 +666,28 @@ def _memory_from_dict(data: Any) -> MemoryRecord:
 def _event_from_dict(data: Any) -> EventRecord:
     item = data if isinstance(data, dict) else {}
     payload = item.get("payload", {})
+    event_type = str(item.get("type") or item.get("event_type") or "event")
+    payload_data = payload if isinstance(payload, dict) else {"value": payload}
+    migration = migrate_event_payload(
+        event_type,
+        payload_data,
+        source_schema_version=_payload_schema_version(item),
+    )
+    validation = validate_event_payload(event_type, migration.payload)
     return EventRecord(
         id=str(item.get("id", "")),
-        event_type=str(item.get("type") or item.get("event_type") or "event"),
+        event_type=event_type,
         run_id=str(item.get("runId") or item.get("run_id") or "unknown"),
-        payload=payload if isinstance(payload, dict) else {"value": payload},
+        payload=migration.payload,
         created_at=str(item.get("createdAt") or item.get("created_at") or ""),
         source=str(item.get("source", "agent")),
         level=str(item.get("level", "info")),
         schema_version=int(item.get("schemaVersion") or item.get("schema_version") or 1),
         redacted=bool(item.get("redacted", False)),
-        payload_schema_version=_payload_schema_version(item),
-        payload_schema_valid=_payload_schema_valid(item),
-        payload_schema_errors=_payload_schema_errors(item),
+        payload_schema_version=validation.schema_version,
+        payload_schema_valid=validation.valid,
+        payload_schema_errors=list(validation.errors),
+        payload_schema_migrations=[*_payload_schema_migrations(item), *migration.migrations_applied],
     )
 
 
@@ -613,6 +695,13 @@ def _payload_schema_version(item: dict[str, Any]) -> int:
     payload_schema = item.get("payloadSchema") or item.get("payload_schema") or {}
     if not isinstance(payload_schema, dict):
         return 1
+    return _optional_int(payload_schema.get("version"), default=1)
+
+
+def _payload_schema_version_if_present(item: dict[str, Any]) -> int | None:
+    payload_schema = item.get("payloadSchema") or item.get("payload_schema")
+    if not isinstance(payload_schema, dict):
+        return None
     return _optional_int(payload_schema.get("version"), default=1)
 
 
@@ -628,6 +717,13 @@ def _payload_schema_errors(item: dict[str, Any]) -> list[str]:
     if not isinstance(payload_schema, dict):
         return []
     return _string_list(payload_schema.get("errors"))
+
+
+def _payload_schema_migrations(item: dict[str, Any]) -> list[str]:
+    payload_schema = item.get("payloadSchema") or item.get("payload_schema") or {}
+    if not isinstance(payload_schema, dict):
+        return []
+    return _string_list(payload_schema.get("migrationsApplied") or payload_schema.get("migrations_applied"))
 
 
 def _max_record_number(records: list[EventRecord], prefix: str) -> int:

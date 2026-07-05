@@ -13,3 +13,9 @@ data/*.sqlite3
 data/eval-*.json
 data/memory.json
 data/memory.json.tmp
+data/tool-budgets.json
+data/tool-budgets.json.tmp
+data/tool-budgets.json.lock
+data/tool-idempotency.json
+data/tool-idempotency.json.tmp
+data/tool-idempotency.json.lock

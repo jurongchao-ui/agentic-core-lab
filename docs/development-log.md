@@ -9,7 +9,7 @@ scope: agentic_core
 
 本轮围绕一次代码评审展开，逐条修掉了发现的问题，并按"每步小改动 → 跑测试 → 看过程"的方式推进。全部改动零新依赖，风格与既有的"规则层 + LLM 层 + 程序把关"一致。
 
-后续又补齐了 Typed State、Persistent Event Log、JSON 记忆持久化、学习计划工具、Eval Harness、Tool Metadata、Middleware Pipeline、Memory Lifecycle、结构化 SafetyPolicy、Event Payload Schema、Event Log Replay Bundle、Event Log to Eval Dataset、Eval Dataset Review、Eval Review Queue Sampling、Eval Review State、Eval Review Agreement、Eval Review Store、Eval Review Decisions API、Eval Judge Registry、Eval Governance Dashboard、Eval Governance Server、Eval Server Auth/RBAC、Signed Claims Token、Tenant Policy JSON、Eval Review Apply API、Eval Review Audit Events、Eval Report Diff、Eval History、Eval Judge、Judge Label Calibration，以及 Ollama `format:"json"`。当前收尾状态：**pytest 275 passed / mypy success / eval harness 8 passed**。
+后续又补齐了 Typed State、Persistent Event Log、JSON 记忆持久化、学习计划工具、Eval Harness、Tool Metadata、Middleware Pipeline、Memory Lifecycle、结构化 SafetyPolicy、Event Payload Schema、Event Log Replay Bundle、Event Log to Eval Dataset、Eval Dataset Review、Eval Review Queue Sampling、Eval Review State、Eval Review Agreement、Eval Review Store、Eval Review Decisions API、Eval Judge Registry、Eval Governance Dashboard、Eval Governance Server、Eval Server Auth/RBAC、Signed Claims Token、Tenant Policy JSON、Eval Review Apply API、Eval Review Audit Events、Eval Report Diff、Eval History、Eval Judge、Judge Label Calibration、ToolTraceSink、OTLP/HTTP Tool Trace Exporter、SQLite Tool Runtime Stores、Local Memory Embedding Search、Memory Review API，以及 Ollama `format:"json"`。当前收尾状态：**pytest 330 passed / mypy success / eval harness 8 passed**。
 
 ---
 
@@ -17,7 +17,7 @@ scope: agentic_core
 
 ### 1. memory.add 网关化，堵住绕过 MemoryPolicy 的后门
 - **问题**：`memory.add` 工具直接暴露给 LLM planner，模型可用任意 text + 自定义 scores 写长期记忆，绕过阈值和敏感检查。设计意图（"长期记忆由程序把关"）与实现矛盾。
-- **修复**：[tools.py](agentic_core/tools.py) 把 `memory.add` 改成 `_memory_add` 方法，强制走 `MemoryPolicy.evaluate()`；模型只提议 text，是否保存/分类/评分全由 policy 决定。`ToolRegistry` 注入 `memory_policy`。
+- **修复**：[registry.py](../agentic_core/tools/registry.py) 把 `memory.add` 改成 `_memory_add` 方法，强制走 `MemoryPolicy.evaluate()`；模型只提议 text，是否保存/分类/评分全由 policy 决定。`ToolRegistry` 注入 `memory_policy`。
 - **测试**：`tests/test_memory_add_gating.py`（含敏感信息拦截、忽略模型自评分）。
 
 ### 2. 工具参数 schema 单一真相源
@@ -38,7 +38,7 @@ scope: agentic_core
 
 ### 5. 可观测性：捕获 LLM 原始输出 + 可读分步 trace
 - **问题**：调试时"看不到过程"——LLM 原始输出从未被捕获，回退是静默的。
-- **修复**：[schemas.py](agentic_core/schemas.py) 给 `Action`/`MemoryDecision` 加 `metadata`；两个 LLM 边界（`HermesPlanner`、`LlmMemoryPolicy`）改成"先存 raw 再解析"，成功/回退都写 `source + rawModelOutput + error`。新增 [trace_view.py](agentic_core/trace_view.py) 渲染可读分步。统一开关 `AGENTIC_TRACE=off|brief|json`（chat 默认 brief，cli 默认 json）。
+- **修复**：[schemas.py](../agentic_core/runtime/schemas.py) 给 `Action`/`MemoryDecision` 加 `metadata`；两个 LLM 边界（`HermesPlanner`、`LlmMemoryPolicy`）改成"先存 raw 再解析"，成功/回退都写 `source + rawModelOutput + error`。新增 [trace_view.py](../agentic_core/observability/trace_view.py) 渲染可读分步。统一开关 `AGENTIC_TRACE=off|brief|json`（chat 默认 brief，cli 默认 json）。
 - **测试**：`tests/test_trace_view.py` + metadata 捕获断言。
 
 ### 6. 加自然语言回复能力（它原来不回话）
@@ -58,7 +58,7 @@ scope: agentic_core
 
 ### 9. 堵住敏感信息泄漏进 note.add / todo.add
 - **问题**（评审后端到端验证时发现）：长期记忆拦住了，但 LLM planner 转头调 `note.add` 把密码原文写进笔记，还被回显。写入类工具没有敏感检查。
-- **修复**：[tools.py](agentic_core/tools.py) 在**工具执行层**（所有工具调用的唯一入口）加守卫——`_register` 增加 `guard_sensitive` 标记，`note.add`/`todo.add` 标为 True；`execute()` 执行前检查输入，命中 `SENSITIVE_PATTERN` 就 `raise`（变失败 observation，不落地），拒绝信息不回显原文。`memory.add` 本就经 policy 网关，无需改。
+- **修复**：[registry.py](../agentic_core/tools/registry.py) 在**工具执行层**（所有工具调用的唯一入口）加守卫——`_register` 增加 `guard_sensitive` 标记，`note.add`/`todo.add` 标为 True；`execute()` 执行前检查输入，命中 `SENSITIVE_PATTERN` 就 `raise`（变失败 observation，不落地），拒绝信息不回显原文。`memory.add` 本就经 policy 网关，无需改。
 - **测试**：`tests/test_tool_sensitive_guard.py`（拒绝且不落地、错误不回显）。
 
 ---
@@ -87,19 +87,19 @@ Agent.run(goal)
 
 Eval Harness：默认 8 个确定性用例,覆盖计算+笔记、长期记忆保存、记忆影响学习计划、安全拒绝、敏感记忆拒绝、技术栈追问、技术栈保存、计算失败不写笔记。报告包含 case pass rate、工具成功率、预期工具失败、事件计数、ResponsePolicy tiers 和质量门禁(`EvalThresholds`)。`eval_dashboard.py` 可把 eval report/history/dataset 聚合成本地 HTML/JSON 治理看板,`eval_server.py` 用标准库 `http.server` 提供 `/health`、`/dashboard`、`/api/dashboard`、`/api/rubrics`、`/api/reviews/status`、`/api/reviews/decisions` 和 `POST /api/reviews/apply`,并支持静态 admin/viewer/reviewer token、本地 signed claims token 和 tenant policy JSON scope: `eval.viewer` 可读,`eval.reviewer` 可写审核;写入 API 只使用服务端配置的 `--dataset` 与 `--review-output`,请求体不能指定文件路径,可通过 `--review-store` 把多人审核 decision 写入 SQLite,并可通过 `--audit-events` 写入 `eval_review_apply` / `eval_review_apply_failed` JSONL 审计事件。`auth_tokens.py` 可创建带 `sub/tenant/scopes/iat/exp` 的 HMAC signed claims token,`tenant_policy.py` 可检查 tenant 是否启用且允许当前 scope。`eval_replay.py` 可按 runId 从 JSONL/SQLite event log 生成 replay inspection bundle,`eval_dataset.py` 可从 JSONL/SQLite event log 生成待审核 dataset 草稿,`eval_sampling.py` 可按 review/judge/risk 原因生成优先级复核队列,`eval_review.py` 可批准/拒绝 case、写入 judge 人工 label、输出多用户 review state、统计多人复核 agreement,并输出 golden dataset,`eval_review_store.py` 可用 SQLite 保存/导入/分页查询 review decisions 并生成 review state,`eval_judge_registry.py` 可登记/校验 judge rubric 版本,`eval_harness --cases --require-reviewed` 可只跑已审核 dataset,`eval_diff.py` 可对比两次 JSON 报告并用 `--fail-on-regression` 接 CI,`eval_history.py` 可把报告追加到 JSONL 历史并输出趋势摘要,`eval_judge.py` 提供离线 rule judge 和可选 Ollama LLM judge 骨架。启用 judge 且 case 带 `expectedJudgeScore` / `expectedJudgePassed` 时,eval 会检查 score drift、label mismatch 和 rubric/version mismatch。
 
-Middleware Pipeline：工具执行已统一进入 `MiddlewarePipeline.execute_tool()`。`RuntimeIdentity` 提供 user/tenant/roles/permission scopes 学习版身份上下文。`ToolSpec.timeoutMs`、`retryCount`、`costUnits`、`requiresApproval`、`permissionScope`、`sideEffect`、`riskLevel` 会进入执行控制和 `Observation.metadata`,为审计、预算、幂等和排障打基础。`ToolGovernancePolicy` 已支持 allowed/denied permission scopes、risk/side-effect 审批策略和 tenant+run 级 cost budget。
+Middleware Pipeline：工具执行已统一进入 `MiddlewarePipeline.execute_tool()`。`RuntimeIdentity` 提供 user/tenant/roles/permission scopes 学习版身份上下文。`ToolSpec.timeoutMs`、`retryCount`、`costUnits`、`requiresApproval`、`permissionScope`、`sideEffect`、`riskLevel`、`owner`、`slaTier`、`dataClassification`、`auditClassification`、`externalSideEffect`、`inputJsonSchema` 和 lifecycle/migration 元数据会进入治理元数据,为审计、预算、幂等、文档和排障打基础。`ToolGovernancePolicy` 已支持 allowed/denied permission scopes、risk/side-effect 审批策略和 tenant+run 级 cost budget。`ToolBudgetStore` / `JsonFileToolBudgetStore` / `SQLiteToolBudgetStore` 已支持本地 JSON 文件和 SQLite 预算后端,可在同机 CLI/chat 进程间共享预算,SQLite 版本用事务保护 reserve。`IdempotencyStore` / `JsonFileIdempotencyStore` / `SQLiteIdempotencyStore` 已接入 write 工具成功结果缓存;read 工具不缓存,失败 write 不缓存,命中时短路返回第一次结果,并可在同机 CLI/chat 进程间共享幂等结果。`ToolOutputSafetyMiddleware` 会净化工具输出和错误中的敏感信息,避免进入最终回复、trace 或事件。`ToolTraceSink` / `InMemoryToolTraceSink` / `JsonlToolTraceSink` / `OtlpHttpToolTraceSink` 已接入 OTel-style 工具 span,覆盖成功、失败、审批短路和幂等命中路径;span 只保存治理元数据和状态,不保存工具输入/输出,可显式发送到 OTLP/HTTP collector。
 
-Event Payload Schema：`event_payloads.py` 已定义核心事件的 required fields 和 typed payload dataclass。Agent 主链路不再现场拼裸 dict 事件 payload;`MemoryStore.record_event()` 会在写入前校验 payload,并将 `payloadSchema.valid/errors` 写进事件,兼容旧 dict 调用。
+Event Payload Schema：`event_payloads.py` 已定义核心事件的 required fields、typed payload dataclass 和标准库版 schema migration。Agent 主链路不再现场拼裸 dict 事件 payload;`MemoryStore.record_event()` 会在写入前迁移旧 payload、校验 payload,并将 `payloadSchema.valid/errors/migrationsApplied` 写进事件,兼容旧 dict 调用。`JsonMemoryStore` 读取旧 v1 事件时也会迁移到当前 payload schema。
 
-环境开关：`AGENTIC_MODEL` / `AGENTIC_PLANNER` / `AGENTIC_MEMORY_POLICY` / `AGENTIC_SAFETY_POLICY` / `AGENTIC_SAFETY_FAIL_CLOSED` / `AGENTIC_USER_ID` / `AGENTIC_TENANT_ID` / `AGENTIC_ROLES` / `AGENTIC_PERMISSION_SCOPES` / `AGENTIC_TRACE` / `AGENTIC_MEMORY_STORE` / `AGENTIC_MEMORY_PATH` / `AGENTIC_EVENT_LOG` / `AGENTIC_EVENT_LOG_PATH` / `AGENTIC_EVENT_LOG_MAX_BYTES` / `AGENTIC_EVENT_LOG_BACKUP_COUNT` / `AGENTIC_EVENT_LOG_LOCK`（+ 兼容 `AGENTIC_CHAT_DEBUG`）。
+环境开关：`AGENTIC_MODEL` / `AGENTIC_PLANNER` / `AGENTIC_MEMORY_POLICY` / `AGENTIC_MEMORY_LIFECYCLE_POLICY_PATH` / `AGENTIC_SAFETY_POLICY` / `AGENTIC_SAFETY_FAIL_CLOSED` / `AGENTIC_SAFETY_REVIEW_QUEUE` / `AGENTIC_SAFETY_REVIEW_QUEUE_PATH` / `AGENTIC_USER_ID` / `AGENTIC_TENANT_ID` / `AGENTIC_ROLES` / `AGENTIC_PERMISSION_SCOPES` / `AGENTIC_TRACE` / `AGENTIC_TOOL_TRACE_SINK` / `AGENTIC_TOOL_TRACE_ENDPOINT` / `AGENTIC_MEMORY_STORE` / `AGENTIC_MEMORY_PATH` / `AGENTIC_EVENT_LOG` / `AGENTIC_EVENT_LOG_PATH` / `AGENTIC_EVENT_LOG_MAX_BYTES` / `AGENTIC_EVENT_LOG_BACKUP_COUNT` / `AGENTIC_EVENT_LOG_LOCK`（+ 兼容 `AGENTIC_CHAT_DEBUG`）。
 
 ---
 
 ## 遗留 / 未做（按优先级）
 
-- **[中] Memory Lifecycle 仍是规则版**：已支持 `MemoryLifecyclePolicy` 单一策略源、active/archived、user/tenant namespace、memory_admin 审核维护 CLI、冲突检测/解决、访问统计、精确去重、技术栈/学习时长偏好的规则语义合并、importance、expiresAt、retention 归档;embedding 语义合并、正式审核 UI、外部化租户级保留策略仍未做。
+- **[中] Memory Lifecycle 仍是规则版 + 本地向量检索边界**：已支持 `MemoryLifecyclePolicy` 单一策略源、JSON 增量策略配置、active/archived、user/tenant namespace、memory_admin 审核维护 CLI、memory review HTTP API、冲突检测/解决、访问统计、精确去重、技术栈/学习时长偏好的规则语义合并、importance、expiresAt、retention 归档、本地 `HashingMemoryEmbeddingIndex` 相似度检索;真实 embedding 语义合并、正式协作审核 UI、租户级策略中心仍未做。
 - **[中] Event Log 后端仍是本地学习版**：已具备 EventWriter 抽象、JSONL、SQLite、大小轮转/备份保留、基础文件锁、轮转备份读取、timeline、eval 统计;Postgres/ClickHouse/OTel、集中式可观测平台、分布式级别并发治理未做。
-- **[中] SafetyPolicy 已有生产化骨架**：已支持规则 checker、LLM checker、CompositeSafetyPolicy 多 checker 汇总、allow/warn/review/refuse 分级动作、fail-open/fail-closed 配置和结构化审计 metadata;真实生产还应接外部 moderation、人审队列、租户级安全策略和更完整的策略包。
+- **[中] SafetyPolicy 已有生产化骨架**：已支持规则 checker、LLM checker、CompositeSafetyPolicy 多 checker 汇总、allow/warn/review/refuse 分级动作、fail-open/fail-closed 配置、结构化审计 metadata 和本地 SafetyReviewQueue;真实生产还应接外部 moderation、协作式人审平台、租户级安全策略和更完整的策略包。
 - **[低] 文档持续维护**：README 已拆分为入口页 + tutorial / architecture / operations / evals / acceptance checklist;后续只需随功能演进同步更新。
 
 已在后续修掉：
@@ -113,7 +113,7 @@ Event Payload Schema：`event_payloads.py` 已定义核心事件的 required fie
 
 ```bash
 cd /Users/jurongchao/Desktop/ai学习测试库/agentic
-.venv/bin/python -m pytest -q  # 275 passed
+.venv/bin/python -m pytest -q  # 330 passed
 .venv/bin/python -m mypy agentic_core
 python3 -m compileall agentic_core examples tests
 python3 -m evalops.harness

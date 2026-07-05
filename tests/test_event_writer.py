@@ -86,7 +86,11 @@ def test_record_event_keeps_legacy_dict_compatibility() -> None:
 
     assert event.run_id == "run_legacy"
     assert event.event_type == "tool_observation"
-    assert event.payload == {"step": 1, "ok": True}
+    assert event.payload["step"] == 1
+    assert event.payload["action"]["type"] == "tool"
+    assert event.payload["observation"]["ok"] is True
+    assert event.payload_schema_valid is True
+    assert event.payload_schema_migrations == ["legacy_flat_tool_observation_to_v1"]
     assert event.source == "tool"
 
 

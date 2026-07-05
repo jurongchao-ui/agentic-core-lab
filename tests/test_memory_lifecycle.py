@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from agentic_core.runtime.agent import Agent
 from agentic_core.memory.store import JsonMemoryStore, MemoryStore
+from agentic_core.runtime.contracts import PlannerContext
 from agentic_core.policies.memory import RuleBasedMemoryPolicy
 from agentic_core.policies.planner import RuleBasedPlanner
+from agentic_core.runtime.schemas import Action
 from agentic_core.runtime.context import RuntimeIdentity
 from agentic_core.tools.registry import ToolRegistry
 
@@ -255,6 +257,59 @@ def test_prune_long_term_memories_archives_low_value_active_memories() -> None:
     assert [item.id for item in memory.snapshot().long_term_memories] == [high.id, medium.id]
 
 
+def test_memory_embedding_search_ranks_relevant_active_memories() -> None:
+    memory = MemoryStore()
+    tech_stack = memory.add_long_term_memory(
+        "user_profile",
+        "用户技术栈: Python、FastAPI、React",
+        "profile",
+        {"user_profile": 5},
+    )
+    study_preference = memory.add_long_term_memory(
+        "preference",
+        "用户偏好: 学习任务控制在 30 分钟以内",
+        "study",
+        {"user_preference": 5},
+    )
+    coffee = memory.add_long_term_memory("long_term_note", "长期笔记: 喜欢咖啡", "note", {})
+    memory.archive_long_term_memory(coffee.id, "irrelevant")
+
+    project_matches = memory.search_long_term_memories("我要写 FastAPI React 项目", limit=1)
+    study_matches = memory.search_long_term_memories("帮我安排 agentic 学习计划", limit=1)
+
+    assert project_matches == [tech_stack]
+    assert study_matches == [study_preference]
+
+
+def test_snapshot_can_rank_and_limit_long_term_memories_by_query() -> None:
+    memory = MemoryStore()
+    memory.add_long_term_memory("preference", "用户偏好: 学习任务控制在 30 分钟以内", "study", {})
+    tech_stack = memory.add_long_term_memory("user_profile", "用户技术栈: Python、FastAPI、React", "profile", {})
+    memory.add_long_term_memory("long_term_note", "长期笔记: 喜欢咖啡", "note", {})
+
+    snapshot = memory.snapshot(query="我要写 React 项目", max_long_term_memories=1)
+
+    assert snapshot.long_term_memories == [tech_stack]
+
+
+def test_agent_planner_receives_query_ranked_memory_snapshot() -> None:
+    memory = MemoryStore()
+    memory.add_long_term_memory("preference", "用户偏好: 学习任务控制在 30 分钟以内", "study", {})
+    tech_stack = memory.add_long_term_memory("user_profile", "用户技术栈: Python、FastAPI、React", "profile", {})
+    policy = RuleBasedMemoryPolicy()
+    planner = CaptureSnapshotPlanner()
+    agent = Agent(
+        planner=planner,
+        tools=ToolRegistry(memory, policy),
+        memory=memory,
+        memory_policy=policy,
+    )
+
+    agent.run("帮我计算 1 + 1, 我后面要写 React 项目")
+
+    assert planner.first_snapshot_ids[0] == tech_stack.id
+
+
 def test_update_long_term_memory_importance_clamps_to_valid_range() -> None:
     memory = MemoryStore()
     record = memory.add_long_term_memory("long_term_note", "长期笔记: x", "test", {})
@@ -262,3 +317,13 @@ def test_update_long_term_memory_importance_clamps_to_valid_range() -> None:
     updated = memory.update_long_term_memory_importance(record.id, 999)
 
     assert updated.importance == 100
+
+
+class CaptureSnapshotPlanner:
+    def __init__(self) -> None:
+        self.first_snapshot_ids: list[str] = []
+
+    def next(self, context: PlannerContext) -> Action:
+        if not self.first_snapshot_ids:
+            self.first_snapshot_ids = [memory.id for memory in context.memory_snapshot.long_term_memories]
+        return Action.final("done", reason="test", source="test")
